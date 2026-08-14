@@ -1,8 +1,12 @@
 # Secrets
 .env
 .env.*
+!.env.example
 *.pem
 *.key
+
+# Build output
+dist/
 
 # Python
 __pycache__/
