@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
-import { vapiToolCallsSchema, readToolArguments, type VapiToolCall } from "../schemas/vapi.js";
+import { vapiToolCallsSchema, normalizeToolCall, type VapiToolCall } from "../schemas/vapi.js";
 import { estimateRequestSchema } from "../schemas/estimate.js";
 import { getEstimate, UnsupportedServiceError, type Estimate } from "../pricing/estimate.js";
 import { SUPPORTED_SERVICES } from "../pricing/catalog.js";
@@ -22,7 +22,10 @@ export const vapiRouter = Router();
  * say something sensible to the caller, so these come back inside a 200. The
  * messages are written to be read aloud, and never include internals.
  */
-function runToolCall(toolCall: VapiToolCall): VapiResult {
+function runToolCall(rawToolCall: VapiToolCall): VapiResult {
+  // Flatten the flat and nested Vapi shapes into one before doing anything.
+  const toolCall = normalizeToolCall(rawToolCall);
+
   if (toolCall.name !== CALCULATE_ESTIMATE) {
     return {
       toolCallId: toolCall.id,
@@ -30,7 +33,7 @@ function runToolCall(toolCall: VapiToolCall): VapiResult {
     };
   }
 
-  const parsed = estimateRequestSchema.safeParse(readToolArguments(toolCall));
+  const parsed = estimateRequestSchema.safeParse(toolCall.arguments);
 
   if (!parsed.success) {
     return {

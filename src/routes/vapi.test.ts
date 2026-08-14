@@ -176,6 +176,19 @@ describe("POST /api/vapi/tools/estimate", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects a tool call with no name in either position", async () => {
+    const res = await request(app)
+      .post(ROUTE)
+      .send({
+        message: {
+          type: "tool-calls",
+          toolCallList: [{ id: "call_123", arguments: { service: "front_brake_pads", vehicle } }]
+        }
+      });
+
+    expect(res.status).toBe(400);
+  });
+
   it("ignores extra Vapi fields such as toolWithToolCallList", async () => {
     const res = await request(app)
       .post(ROUTE)
@@ -203,5 +216,151 @@ describe("POST /api/vapi/tools/estimate", () => {
 
     expect(res.status).toBe(200);
     expect(JSON.parse(res.body.results[0].result).low).toBe(300);
+  });
+});
+
+/**
+ * Vapi also emits an OpenAI-style shape where the name and arguments live
+ * under `function`. This is what caused a live "Invalid Vapi tool-call request
+ * body." error before the adapter understood it.
+ */
+describe("POST /api/vapi/tools/estimate (nested function shape)", () => {
+  function nestedEnvelope(fn: Record<string, unknown>, id = "call_123") {
+    return { message: { type: "tool-calls", toolCallList: [{ id, function: fn }] } };
+  }
+
+  it("reads the tool name from function.name", async () => {
+    const res = await request(app)
+      .post(ROUTE)
+      .send(
+        nestedEnvelope({
+          name: "calculate_estimate",
+          arguments: { service: "front_brake_pads", vehicle }
+        })
+      );
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].error).toBeUndefined();
+  });
+
+  it("reads an object from function.arguments", async () => {
+    const res = await request(app)
+      .post(ROUTE)
+      .send(
+        nestedEnvelope({
+          name: "calculate_estimate",
+          arguments: { businessId: "demo-shop", service: "front_brake_pads", vehicle }
+        })
+      );
+
+    const parsed = JSON.parse(res.body.results[0].result);
+    expect(parsed.low).toBe(300);
+    expect(parsed.high).toBe(450);
+    expect(parsed.estimateId).toBeTypeOf("string");
+  });
+
+  it("reads a JSON string from function.arguments", async () => {
+    const res = await request(app)
+      .post(ROUTE)
+      .send(
+        nestedEnvelope({
+          name: "calculate_estimate",
+          arguments: JSON.stringify({ service: "front_brake_pads", vehicle })
+        })
+      );
+
+    expect(res.status).toBe(200);
+    const parsed = JSON.parse(res.body.results[0].result);
+    expect(parsed.low).toBe(300);
+    expect(parsed.high).toBe(450);
+  });
+
+  it("echoes the correct toolCallId for the nested shape", async () => {
+    const res = await request(app)
+      .post(ROUTE)
+      .send(
+        nestedEnvelope(
+          { name: "calculate_estimate", arguments: { service: "front_brake_pads", vehicle } },
+          "call_nested_456"
+        )
+      );
+
+    expect(res.body.results[0].toolCallId).toBe("call_nested_456");
+  });
+
+  it("returns a tool-level error for an unsupported nested tool name", async () => {
+    const res = await request(app)
+      .post(ROUTE)
+      .send(nestedEnvelope({ name: "book_appointment", arguments: { service: "front_brake_pads", vehicle } }));
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].toolCallId).toBe("call_123");
+    expect(res.body.results[0].error).toMatch(/Unsupported tool/);
+  });
+
+  it("returns a tool-level error for an unsupported nested service", async () => {
+    const res = await request(app)
+      .post(ROUTE)
+      .send(
+        nestedEnvelope({ name: "calculate_estimate", arguments: { service: "engine_rebuild", vehicle } })
+      );
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].error).toMatch(/not supported/);
+  });
+
+  it("returns a tool-level error for unparseable JSON-string arguments", async () => {
+    const res = await request(app)
+      .post(ROUTE)
+      .send(nestedEnvelope({ name: "calculate_estimate", arguments: "{not valid json" }));
+
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].error).toMatch(/Invalid estimate parameters/);
+  });
+
+  // Captured from a real Vapi call. It carries the same tool call twice, in
+  // `toolCalls` and `toolCallList`, and tags each one with `type: "function"`.
+  // Only toolCallList is read, so the duplicate must not be processed twice.
+  it("handles the exact payload captured from a live Vapi call", async () => {
+    const toolCall = {
+      id: "call_example",
+      type: "function",
+      function: {
+        name: "calculate_estimate",
+        arguments: {
+          service: "front_brake_pads",
+          vehicle: { make: "Toyota", year: 2019, model: "Camry" },
+          businessId: "demo-shop"
+        }
+      }
+    };
+
+    const res = await request(app)
+      .post(ROUTE)
+      .send({ message: { type: "tool-calls", toolCalls: [toolCall], toolCallList: [toolCall] } });
+
+    expect(res.status).toBe(200);
+    expect(res.body.results).toHaveLength(1);
+    expect(res.body.results[0].toolCallId).toBe("call_example");
+    expect(res.body.results[0].error).toBeUndefined();
+
+    const parsed = JSON.parse(res.body.results[0].result);
+    expect(parsed.low).toBe(300);
+    expect(parsed.high).toBe(450);
+  });
+
+  it("gives the same prices as the flat shape", async () => {
+    const nested = await request(app)
+      .post(ROUTE)
+      .send(
+        nestedEnvelope({ name: "calculate_estimate", arguments: { service: "front_brake_pads", vehicle } })
+      );
+    const flat = await request(app).post(ROUTE).send(validCall);
+
+    const fromNested = JSON.parse(nested.body.results[0].result);
+    const fromFlat = JSON.parse(flat.body.results[0].result);
+
+    expect(fromNested.low).toBe(fromFlat.low);
+    expect(fromNested.high).toBe(fromFlat.high);
   });
 });
