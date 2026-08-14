@@ -6,7 +6,7 @@
   "description": "Backend for an AI mechanic-shop receptionist",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
@@ -17,11 +17,11 @@
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
-    "@types/node": "^20.14.10",
+    "@types/node": "^24.13.3",
     "@types/supertest": "^6.0.2",
     "supertest": "^7.0.0",
     "tsx": "^4.16.2",
     "typescript": "^5.5.3",
-    "vitest": "^2.0.5"
+    "vitest": "^4.1.10"
   }
 }

@@ -73,6 +73,16 @@ Expected response:
 }
 ```
 
+### Health check
+
+A simple endpoint to confirm the server is running:
+
+```bash
+curl http://localhost:3000/health
+```
+
+Returns `{"status":"ok"}` with HTTP 200.
+
 ### Supported services
 
 | Service                 | Price range |
@@ -110,6 +120,8 @@ src/
   routes/
     estimate.ts          # POST /api/estimate route handler
     estimate.test.ts      # HTTP-level tests for the route
+    health.ts             # GET /health route handler
+    health.test.ts         # test for the health check
   schemas/
     estimate.ts          # Zod schema for validating the request body
   pricing/
