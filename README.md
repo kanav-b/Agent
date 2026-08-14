@@ -94,6 +94,60 @@ curl -X POST http://localhost:3000/api/estimate \
   }'
 ```
 
+### Vapi tool endpoint
+
+`POST /api/vapi/tools/estimate` is an adapter for a Vapi custom tool. It speaks
+Vapi's envelope format, but it does **not** calculate anything itself — it
+calls the exact same pricing code as `POST /api/estimate`, so both routes
+always agree on price.
+
+It answers one tool, `calculate_estimate`. The tool arguments are the same
+shape as the normal estimate request body.
+
+```bash
+curl -X POST http://localhost:3000/api/vapi/tools/estimate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": {
+      "type": "tool-calls",
+      "toolCallList": [
+        {
+          "id": "call_test_123",
+          "name": "calculate_estimate",
+          "arguments": {
+            "businessId": "demo-shop",
+            "service": "front_brake_pads",
+            "vehicle": { "year": 2019, "make": "Toyota", "model": "Camry" }
+          }
+        }
+      ]
+    }
+  }'
+```
+
+Vapi requires `result` to be a string, so the estimate is sent back as compact
+JSON inside it:
+
+```json
+{
+  "results": [
+    { "toolCallId": "call_test_123", "result": "{\"estimateId\":\"...\",\"low\":300,\"high\":450,...}" }
+  ]
+}
+```
+
+If the tool call fails in a way Vapi should explain to the caller (unknown
+service, bad parameters, unknown tool), the response is still **HTTP 200** with
+an `error` string instead of `result`, so the assistant can respond naturally:
+
+```json
+{
+  "results": [
+    { "toolCallId": "call_test_123", "error": "Service \"engine_rebuild\" is not supported. ..." }
+  ]
+}
+```
+
 ### Health check
 
 A simple endpoint to confirm the server is running:
@@ -143,8 +197,11 @@ src/
     estimate.test.ts      # HTTP-level tests for the route
     health.ts             # GET /health route handler
     health.test.ts         # test for the health check
+    vapi.ts                # POST /api/vapi/tools/estimate (Vapi adapter)
+    vapi.test.ts            # tests for the Vapi adapter
   schemas/
     estimate.ts          # Zod schema for validating the request body
+    vapi.ts               # Zod schema for the Vapi tool-call envelope
   pricing/
     catalog.ts            # hardcoded price ranges per service
     estimate.ts            # pure pricing logic (no Express, no HTTP)
