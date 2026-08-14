@@ -6,7 +6,12 @@ export const vehicleSchema = z.object({
   model: z.string().min(1)
 });
 
+export const DEFAULT_BUSINESS_ID = "demo-shop";
+
 export const estimateRequestSchema = z.object({
+  // Optional today. Callers that leave it out get the demo shop, so existing
+  // requests keep working. It does not affect pricing yet.
+  businessId: z.string().min(1).default(DEFAULT_BUSINESS_ID),
   service: z.string().min(1),
   vehicle: vehicleSchema
 });

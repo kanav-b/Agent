@@ -28,4 +28,14 @@ describe("getEstimate", () => {
   it("throws UnsupportedServiceError for an unknown service", () => {
     expect(() => getEstimate("engine_rebuild", vehicle)).toThrow(UnsupportedServiceError);
   });
+
+  it("is deterministic and does not generate an id", () => {
+    const first = getEstimate("front_brake_pads", vehicle);
+    const second = getEstimate("front_brake_pads", vehicle);
+
+    // Identical inputs must give an identical result, which also means the
+    // pricing layer must not put a random estimateId in here.
+    expect(first).toEqual(second);
+    expect(first).not.toHaveProperty("estimateId");
+  });
 });

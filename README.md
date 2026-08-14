@@ -63,6 +63,7 @@ Expected response:
 
 ```json
 {
+  "estimateId": "3f1c2b8e-9a45-4d21-9f0e-7c6a5b4d3e2f",
   "estimateType": "preliminary",
   "service": "front_brake_pads",
   "vehicle": { "year": 2019, "make": "Toyota", "model": "Camry" },
@@ -71,6 +72,26 @@ Expected response:
   "currency": "USD",
   "disclaimer": "Final pricing is subject to vehicle inspection."
 }
+```
+
+`estimateId` is a fresh UUID on every successful estimate, so a single quote
+can be referred to later (for example, during a phone call). The prices
+themselves never change for the same service and vehicle.
+
+### Optional: businessId
+
+The shop can be named explicitly. It is optional and defaults to
+`"demo-shop"`, and it does **not** affect pricing yet — it is here so the API
+can support multiple shops later.
+
+```bash
+curl -X POST http://localhost:3000/api/estimate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "businessId": "demo-shop",
+    "service": "front_brake_pads",
+    "vehicle": { "year": 2019, "make": "Toyota", "model": "Camry" }
+  }'
 ```
 
 ### Health check
