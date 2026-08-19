@@ -47,6 +47,8 @@ export interface PersistEstimateInput {
   estimate: Estimate;
   source: "api" | "vapi";
   vapiToolCallId?: string;
+  /** Vapi's id for the call this estimate was made during, when there is one. */
+  vapiCallId?: string;
 }
 
 export interface PersistEstimateResult {
@@ -181,7 +183,8 @@ export async function saveEstimate(
       currency: input.estimate.currency,
       disclaimer: input.estimate.disclaimer,
       source: input.source,
-      vapi_tool_call_id: input.vapiToolCallId ?? null
+      vapi_tool_call_id: input.vapiToolCallId ?? null,
+      vapi_call_id: input.vapiCallId ?? null
     });
 
   if (error) {

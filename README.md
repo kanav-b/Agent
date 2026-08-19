@@ -49,8 +49,9 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
 Put it in `.env`, then set the same value in the Vapi dashboard as a custom
-header on the tool: `x-vapi-tool-secret`. Requests without it are rejected with
-`401` before any pricing or database work happens.
+header — on the tool **and** on the server URL: `x-vapi-tool-secret`. Requests
+without it are rejected with `401` before any pricing or database work happens.
+One secret covers both Vapi endpoints.
 
 > **⚠️ Never commit `SUPABASE_SECRET_KEY`.**
 > This key bypasses row level security and can read and write your entire
@@ -72,7 +73,17 @@ supabase/migrations/20260815000000_init.sql
 
 and click **Run**. This creates four tables (`businesses`, `customers`,
 `vehicles`, `estimates`), adds the `demo-shop` business every request falls
-back to, and turns on row level security. Running it more than once is safe.
+back to, and turns on row level security.
+
+Then run the two Phase 6 migrations the same way, in this order:
+
+```
+supabase/migrations/20260819000000_calls.sql
+supabase/migrations/20260819000100_estimates_vapi_call_id.sql
+```
+
+The first adds the `calls` table; the second lets an estimate remember which
+call produced it. All three are safe to run more than once.
 
 ## 4. Check the database connection
 
@@ -80,9 +91,13 @@ back to, and turns on row level security. Running it more than once is safe.
 npm run db:check
 ```
 
-This confirms the credentials work, that `demo-shop` exists, and prints the
-five most recent estimates. It prints no secrets, and nothing runs it
-automatically — it is there for you to run when you want to check.
+This confirms the credentials work, that `demo-shop` exists, and that the
+`estimates` and `calls` tables are reachable. It prints the five most recent
+estimates and calls.
+
+It prints no secrets and **no personal information** — calls are listed by
+Vapi call id, outcome, and follow-up flag only, never by phone number, name, or
+transcript. Nothing runs it automatically.
 
 ## 5. Run the server
 
@@ -203,6 +218,98 @@ an `error` string instead of `result`, so the assistant can respond naturally:
 }
 ```
 
+### Vapi events endpoint (end-of-call reports)
+
+`POST /api/vapi/events` receives Vapi's server events. It uses the **same**
+`x-vapi-tool-secret` header as the tool endpoint — there is one shared secret,
+not two.
+
+Only `end-of-call-report` is acted on. Any other event type is acknowledged and
+dropped, so you can point all of Vapi's server events here safely:
+
+```json
+{ "status": "ignored" }
+```
+
+A stored report returns:
+
+```json
+{ "status": "ok" }
+```
+
+#### What a completed call stores
+
+| Table | What happens |
+| --- | --- |
+| `calls` | One row: Vapi call id, business, caller phone, start/end times, ended reason, transcript, summary, outcome, follow-up flag |
+| `customers` | The caller, matched or created — **only when a phone number is present** |
+| `estimates` | Estimates made during the call get their `customer_id` filled in, if it was blank |
+
+#### Customer matching
+
+Conservative by design:
+
+1. **No phone number** → no customer is created and `customer_id` stays null.
+   A caller is never invented to satisfy the schema.
+2. **Phone matches an existing customer** for that business → that customer is
+   reused.
+3. **No match** → a new customer is created from the phone and, if Vapi
+   supplied one, the name.
+
+A name is only ever *filled in* when the stored one is null. An existing name
+is never overwritten automatically.
+
+#### Repeated reports
+
+Vapi retries server events. `calls.vapi_call_id` is unique and the write is an
+upsert, so a repeated report **updates the existing row** rather than adding a
+second one. `created_at` keeps its original value. Sending the same report ten
+times leaves exactly one call row.
+
+If the write fails, the endpoint returns **HTTP 500** — that tells Vapi the
+report was not recorded so it can retry, which is safe precisely because the
+write is idempotent.
+
+#### Call outcome
+
+Deterministic, never a guess:
+
+| Outcome | When |
+| --- | --- |
+| `estimate_provided` | An estimate from this call is in the database |
+| `unresolved` | The ended reason indicates the call broke (errors, timeouts) |
+| `callback_requested` | The transcript or summary contains an explicit phrase like "call me back" |
+| `information_only` | There is a transcript and none of the above applies |
+| `unknown` | Not enough information |
+
+`requires_follow_up` is true for `callback_requested` and `unresolved`, false
+otherwise. There is no sentiment analysis and no urgency detection.
+
+#### Pointing Vapi at this endpoint
+
+Once the server is reachable (via ngrok or a deployment), in the Vapi
+dashboard set the assistant's **Server URL** to:
+
+```
+https://<your-host>/api/vapi/events
+```
+
+and add the custom header `x-vapi-tool-secret` with your `VAPI_TOOL_SECRET`
+value. Enable the `end-of-call-report` server message. For summaries, also
+enable Vapi's post-call analysis — this backend never calls an LLM to write
+one, and stores `null` when Vapi does not supply one.
+
+> **Privacy note.** Call records contain personal information: phone numbers,
+> names, and everything said on the call. The `calls` and `customers` tables
+> have row level security enabled with no policies, so only the server's secret
+> key can read them. Failure logs deliberately record only the Vapi call id,
+> the step, the database error code, and the business — never a phone number,
+> name, or transcript. Treat a database backup as personal data.
+>
+> **Never expose `SUPABASE_SECRET_KEY` or `VAPI_TOOL_SECRET`.** Both are
+> server-side only. Neither belongs in a browser, a frontend build, a log line,
+> a screenshot, or a commit.
+
 ### Health check
 
 A simple endpoint to confirm the server is running:
@@ -292,12 +399,15 @@ src/
   config.ts             # the only place that reads process.env
   db/
     supabase.ts          # server-only Supabase client
-    estimates.ts          # every database query lives here
+    estimates.ts          # estimate queries
+    calls.ts               # call and customer queries
   scripts/
     check-db.ts           # manual connection check (npm run db:check)
   middleware/
     vapiAuth.ts          # shared-secret check for the Vapi endpoint
     errors.ts             # JSON 404 / 500 handling, no stack traces
+  calls/
+    normalize.ts         # end-of-call payload -> flat record, outcome rules
   routes/
     estimate.ts          # POST /api/estimate route handler
     estimate.test.ts      # HTTP-level tests for the route
@@ -305,9 +415,11 @@ src/
     health.test.ts         # test for the health check
     vapi.ts                # POST /api/vapi/tools/estimate (Vapi adapter)
     vapi.test.ts            # tests for the Vapi adapter
+    vapiEvents.ts            # POST /api/vapi/events (end-of-call reports)
   schemas/
     estimate.ts          # Zod schema for validating the request body
     vapi.ts               # Zod schema for the Vapi tool-call envelope
+    vapiEvents.ts          # Zod schema for Vapi server events
   pricing/
     catalog.ts            # hardcoded price ranges per service
     estimate.ts            # pure pricing logic (no Express, no HTTP)
@@ -316,8 +428,6 @@ src/
 
 ## What's intentionally not here yet
 
-- Caller identity (customer name and phone are never captured, so `customers`
-  stays empty and `customer_id` is always null)
 - Appointment scheduling
 - SMS (Twilio)
 - Calendar booking (Google Calendar)

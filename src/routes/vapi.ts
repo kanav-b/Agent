@@ -23,7 +23,7 @@ export const vapiRouter = Router();
  * say something sensible to the caller, so these come back inside a 200. The
  * messages are written to be read aloud, and never include internals.
  */
-async function runToolCall(rawToolCall: VapiToolCall): Promise<VapiResult> {
+async function runToolCall(rawToolCall: VapiToolCall, vapiCallId?: string): Promise<VapiResult> {
   // Flatten the flat and nested Vapi shapes into one before doing anything.
   const toolCall = normalizeToolCall(rawToolCall);
 
@@ -73,7 +73,9 @@ async function runToolCall(rawToolCall: VapiToolCall): Promise<VapiResult> {
       vehicle,
       estimate,
       source: "vapi",
-      vapiToolCallId: toolCall.id
+      vapiToolCallId: toolCall.id,
+      // Lets the end-of-call report find the estimates made during the call.
+      vapiCallId
     });
     // On a retry this is the id stored the first time, not the new one.
     storedEstimateId = saved.estimateId;
@@ -103,7 +105,11 @@ vapiRouter.post("/estimate", async (req, res) => {
     return res.status(400).json({ error: "Invalid Vapi tool-call request body." });
   }
 
-  const results = await Promise.all(parsed.data.message.toolCallList.map(runToolCall));
+  const vapiCallId = parsed.data.message.call?.id;
+
+  const results = await Promise.all(
+    parsed.data.message.toolCallList.map((toolCall) => runToolCall(toolCall, vapiCallId))
+  );
 
   return res.status(200).json({ results });
 });

@@ -141,6 +141,25 @@ describe("persistEstimate — new Vapi tool call", () => {
     });
   });
 
+  it("records the Vapi call id when the tool payload had one", async () => {
+    await persistEstimate({
+      ...baseInput,
+      source: "vapi",
+      vapiToolCallId: "call_new_4",
+      vapiCallId: "vapi-call-xyz"
+    });
+
+    const row = calls.find((c) => c.table === "estimates" && c.op === "insert")?.payload;
+    expect(row?.vapi_call_id).toBe("vapi-call-xyz");
+  });
+
+  it("stores a null call id when there was none", async () => {
+    await persistEstimate({ ...baseInput, source: "api" });
+
+    const row = calls.find((c) => c.table === "estimates" && c.op === "insert")?.payload;
+    expect(row?.vapi_call_id).toBeNull();
+  });
+
   it("writes the vehicle with no customer", async () => {
     await persistEstimate({ ...baseInput, source: "vapi", vapiToolCallId: "call_new_3" });
 

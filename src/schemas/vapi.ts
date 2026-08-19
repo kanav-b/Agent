@@ -38,6 +38,9 @@ const toolCallSchema = z
 export const vapiToolCallsSchema = z.object({
   message: z.object({
     type: z.literal("tool-calls"),
+    // Vapi includes the call on tool-call requests. Optional here so a
+    // hand-made request without one still works.
+    call: z.object({ id: z.string().min(1) }).passthrough().optional(),
     toolCallList: z.array(toolCallSchema).min(1)
   })
 });

@@ -440,3 +440,46 @@ describe("POST /api/vapi/tools/estimate persistence", () => {
     expect(mockPersist).not.toHaveBeenCalled();
   });
 });
+
+describe("POST /api/vapi/estimate — linking the estimate to its call", () => {
+  /** Vapi includes the call on tool-call requests, so estimates can record it. */
+  function callWithId(vapiCallId?: string) {
+    const message: Record<string, unknown> = {
+      type: "tool-calls",
+      toolCallList: [
+        {
+          id: "call_link_1",
+          name: "calculate_estimate",
+          arguments: { service: "front_brake_pads", vehicle }
+        }
+      ]
+    };
+    if (vapiCallId) {
+      message.call = { id: vapiCallId, orgId: "org_1" };
+    }
+    return { message };
+  }
+
+  it("persists the Vapi call id from the tool payload", async () => {
+    await postTool(callWithId("vapi-call-abc"));
+
+    expect(mockPersist.mock.calls[0][0].vapiCallId).toBe("vapi-call-abc");
+  });
+
+  it("still works when the payload has no call object", async () => {
+    const res = await postTool(callWithId());
+
+    expect(res.status).toBe(200);
+    expect(mockPersist.mock.calls[0][0].vapiCallId).toBeUndefined();
+  });
+
+  it("does not let the call id change the price", async () => {
+    const withCall = await postTool(callWithId("vapi-call-abc"));
+    const withoutCall = await postTool(callWithId());
+
+    const a = JSON.parse(withCall.body.results[0].result);
+    const b = JSON.parse(withoutCall.body.results[0].result);
+    expect(a.low).toBe(b.low);
+    expect(a.high).toBe(b.high);
+  });
+});
