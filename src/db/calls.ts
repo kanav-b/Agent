@@ -224,20 +224,34 @@ export async function saveCall(call: NormalizedCall, customerId: string | null):
  * without a customer rather than against an invented one.
  */
 export async function resolveCustomer(call: NormalizedCall): Promise<string | null> {
-  if (!call.callerPhone) {
+  return resolveCustomerByPhone(call.businessId, call.callerPhone, call.customerName);
+}
+
+/**
+ * The shared caller-matching rule, used by calls and by appointment/callback
+ * requests so both behave identically.
+ *
+ * No phone number means no match is possible, so no customer is created.
+ */
+export async function resolveCustomerByPhone(
+  businessId: string,
+  phone: string | null,
+  name: string | null
+): Promise<string | null> {
+  if (!phone) {
     return null;
   }
 
-  const existing = await findCustomerByPhone(call.businessId, call.callerPhone);
+  const existing = await findCustomerByPhone(businessId, phone);
 
   if (existing) {
-    if (!existing.name && call.customerName) {
-      await updateCustomerNameIfMissing(existing.id, call.customerName);
+    if (!existing.name && name) {
+      await updateCustomerNameIfMissing(existing.id, name);
     }
     return existing.id;
   }
 
-  return createCustomer(call.businessId, call.callerPhone, call.customerName);
+  return createCustomer(businessId, phone, name);
 }
 
 export interface PersistCallResult {

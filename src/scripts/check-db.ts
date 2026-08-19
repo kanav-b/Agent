@@ -63,6 +63,7 @@ async function main(): Promise<void> {
   }
 
   await checkCalls();
+  await checkRequests();
 }
 
 /**
@@ -106,6 +107,48 @@ async function checkCalls(): Promise<void> {
       `      ${row.created_at}  ${String(row.outcome ?? "unknown").padEnd(18)}  ` +
         `${followUp.padEnd(9)}  ${row.vapi_call_id}`
     );
+  }
+}
+
+/**
+ * Reports on appointment and callback requests.
+ *
+ * Only ids, statuses, and timestamps are selected. Phone numbers, names,
+ * problem descriptions, and callback reasons are never read, so they cannot
+ * reach the terminal.
+ */
+async function checkRequests(): Promise<void> {
+  const supabase = getSupabase();
+
+  for (const [table, label] of [
+    ["appointment_requests", "appointment"],
+    ["callback_requests", "callback"]
+  ] as const) {
+    const { count, error: countError } = await supabase
+      .from(table)
+      .select("id", { count: "exact", head: true });
+
+    if (countError) {
+      throw new Error(`Could not query ${table}: ${countError.message}`);
+    }
+
+    console.log(`OK    ${label} requests reachable, ${count ?? 0} row(s) total.`);
+
+    const { data: recent, error: recentError } = await supabase
+      .from(table)
+      .select("id, status, created_at")
+      .order("created_at", { ascending: false })
+      .limit(5);
+
+    if (recentError) {
+      throw new Error(`Could not query recent ${table}: ${recentError.message}`);
+    }
+
+    for (const row of recent ?? []) {
+      console.log(
+        `      ${row.created_at}  ${String(row.status).padEnd(10)}  ${row.id}`
+      );
+    }
   }
 }
 

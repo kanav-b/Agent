@@ -220,6 +220,49 @@ describe("classifyOutcome", () => {
     });
   });
 
+  it("is callback_requested when a callback request row exists", () => {
+    expect(classifyOutcome(base, { estimateProvided: false, callbackRequested: true })).toEqual({
+      outcome: "callback_requested",
+      requiresFollowUp: true
+    });
+  });
+
+  it("is appointment_requested when an appointment request row exists", () => {
+    expect(classifyOutcome(base, { estimateProvided: false, appointmentRequested: true })).toEqual({
+      outcome: "appointment_requested",
+      requiresFollowUp: true
+    });
+  });
+
+  it("puts a callback row ahead of an appointment row", () => {
+    const verdict = classifyOutcome(base, {
+      estimateProvided: false,
+      callbackRequested: true,
+      appointmentRequested: true
+    });
+
+    expect(verdict.outcome).toBe("callback_requested");
+  });
+
+  it("puts a request row ahead of a broken call", () => {
+    const broken = { ...base, endedReason: "pipeline-error-openai-llm-failed" };
+
+    expect(
+      classifyOutcome(broken, { estimateProvided: false, appointmentRequested: true }).outcome
+    ).toBe("appointment_requested");
+  });
+
+  it("lets a stored estimate outrank a request row", () => {
+    const verdict = classifyOutcome(base, {
+      estimateProvided: true,
+      callbackRequested: true,
+      appointmentRequested: true
+    });
+
+    expect(verdict.outcome).toBe("estimate_provided");
+    expect(verdict.requiresFollowUp).toBe(false);
+  });
+
   it("lets a stored estimate outrank the callback phrase", () => {
     const both = { ...base, transcript: "User: call me back" };
 

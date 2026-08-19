@@ -11,13 +11,21 @@ vi.mock("../db/calls.js", async (importOriginal) => {
   };
 });
 vi.mock("../db/estimates.js", () => ({ persistEstimate: vi.fn() }));
+vi.mock("../db/requests.js", () => ({
+  hasRequestForCall: vi.fn(),
+  linkRequestsToCustomer: vi.fn(),
+  logRequestFailure: vi.fn()
+}));
 
 import { createApp } from "../app.js";
 import { findEstimatesForCall, persistCall } from "../db/calls.js";
+import { hasRequestForCall, linkRequestsToCustomer } from "../db/requests.js";
 import { VAPI_SECRET_HEADER } from "../middleware/vapiAuth.js";
 
 const mockPersistCall = vi.mocked(persistCall);
 const mockFindEstimates = vi.mocked(findEstimatesForCall);
+const mockHasRequest = vi.mocked(hasRequestForCall);
+const mockLinkRequests = vi.mocked(linkRequestsToCustomer);
 
 const TEST_SECRET = "test-vapi-secret-not-real";
 process.env.SUPABASE_URL = "https://test.invalid";
@@ -56,6 +64,10 @@ beforeEach(() => {
   mockPersistCall.mockResolvedValue({ duplicate: false, customerId: "customer-1" });
   mockFindEstimates.mockReset();
   mockFindEstimates.mockResolvedValue([]);
+  mockHasRequest.mockReset();
+  mockHasRequest.mockResolvedValue(false);
+  mockLinkRequests.mockReset();
+  mockLinkRequests.mockResolvedValue(undefined);
 });
 
 describe("POST /api/vapi/events — end-of-call report", () => {
@@ -266,3 +278,82 @@ describe("POST /api/vapi/events — authentication", () => {
     expect(mockFindEstimates).not.toHaveBeenCalled();
   });
 });
+
+describe("POST /api/vapi/events — structured requests decide the outcome", () => {
+  it("records callback_requested when a callback row exists", async () => {
+    mockHasRequest.mockImplementation(async (kind) => kind === "callback");
+
+    await postEvent(endOfCall());
+
+    expect(persistedCall().outcome).toBe("callback_requested");
+    expect(persistedCall().requiresFollowUp).toBe(true);
+  });
+
+  it("records appointment_requested when an appointment row exists", async () => {
+    mockHasRequest.mockImplementation(async (kind) => kind === "appointment");
+
+    await postEvent(endOfCall());
+
+    expect(persistedCall().outcome).toBe("appointment_requested");
+    expect(persistedCall().requiresFollowUp).toBe(true);
+  });
+
+  it("lets an estimate outrank both request kinds", async () => {
+    mockFindEstimates.mockResolvedValue(["estimate-1"]);
+    mockHasRequest.mockResolvedValue(true);
+
+    await postEvent(endOfCall());
+
+    expect(persistedCall().outcome).toBe("estimate_provided");
+  });
+
+  it("puts a callback request ahead of an appointment request", async () => {
+    mockHasRequest.mockResolvedValue(true);
+
+    await postEvent(endOfCall());
+
+    expect(persistedCall().outcome).toBe("callback_requested");
+  });
+
+  it("puts a structured request ahead of a broken call", async () => {
+    mockHasRequest.mockImplementation(async (kind) => kind === "appointment");
+
+    await postEvent(endOfCall({ endedReason: "pipeline-error-openai-llm-failed" }));
+
+    expect(persistedCall().outcome).toBe("appointment_requested");
+  });
+
+  it("still falls back to the phrase heuristic when no request row exists", async () => {
+    await postEvent(
+      endOfCall({ artifact: { transcript: "User: please have someone call me back" } })
+    );
+
+    expect(persistedCall().outcome).toBe("callback_requested");
+  });
+});
+
+describe("POST /api/vapi/events — backfilling the caller onto requests", () => {
+  it("links requests to the resolved customer", async () => {
+    await postEvent(endOfCall());
+
+    expect(mockLinkRequests).toHaveBeenCalledWith("vapi-call-1", "customer-1");
+  });
+
+  it("does not try to link when no customer could be resolved", async () => {
+    mockPersistCall.mockResolvedValue({ duplicate: false, customerId: null });
+
+    await postEvent(endOfCall());
+
+    expect(mockLinkRequests).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 when the backfill fails, so Vapi retries", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mockLinkRequests.mockRejectedValue(new Error("connection refused"));
+
+    const res = await postEvent(endOfCall());
+
+    expect(res.status).toBe(500);
+  });
+});
+

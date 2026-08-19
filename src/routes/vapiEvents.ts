@@ -2,6 +2,7 @@ import { Router } from "express";
 import { vapiEventSchema, endOfCallReportSchema, END_OF_CALL_REPORT } from "../schemas/vapiEvents.js";
 import { classifyOutcome, normalizeEndOfCall } from "../calls/normalize.js";
 import { findEstimatesForCall, logCallFailure, persistCall } from "../db/calls.js";
+import { hasRequestForCall, linkRequestsToCustomer } from "../db/requests.js";
 
 export const vapiEventsRouter = Router();
 
@@ -37,12 +38,26 @@ vapiEventsRouter.post("/events", async (req, res) => {
   const data = normalizeEndOfCall(message);
 
   try {
-    // A stored estimate is the one piece of hard evidence about what the call
-    // achieved, so it is read before deciding the outcome.
-    const estimates = await findEstimatesForCall(data.vapiCallId);
-    const verdict = classifyOutcome(data, { estimateProvided: estimates.length > 0 });
+    // Rows written during the call are the hard evidence about what it
+    // achieved, so they are read before deciding the outcome.
+    const [estimates, callbackRequested, appointmentRequested] = await Promise.all([
+      findEstimatesForCall(data.vapiCallId),
+      hasRequestForCall("callback", data.vapiCallId),
+      hasRequestForCall("appointment", data.vapiCallId)
+    ]);
 
-    await persistCall({ ...data, ...verdict });
+    const verdict = classifyOutcome(data, {
+      estimateProvided: estimates.length > 0,
+      callbackRequested,
+      appointmentRequested
+    });
+
+    const { customerId } = await persistCall({ ...data, ...verdict });
+
+    if (customerId) {
+      // Requests made during the call did not know who was speaking either.
+      await linkRequestsToCustomer(data.vapiCallId, customerId);
+    }
 
     return res.status(200).json({ status: "ok" });
   } catch (err) {

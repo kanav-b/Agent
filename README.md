@@ -4,9 +4,10 @@ Backend API for an AI receptionist that gives customers a preliminary price
 estimate for common auto services.
 
 Prices come from a hardcoded catalog, estimates are stored in Supabase, and a
-Vapi voice assistant can request one during a call. The Vapi tool endpoint is
-protected by a shared secret. There is no scheduling, SMS, or frontend yet —
-those come later.
+Vapi voice assistant can request one during a call. The assistant can also
+record appointment and callback **requests** — which the shop still has to act
+on, since nothing here confirms a booking. All Vapi endpoints are protected by
+a shared secret. There is no calendar, SMS, or frontend yet.
 
 ## Requirements
 
@@ -31,7 +32,7 @@ folder.
 cp .env.example .env
 ```
 
-Then open `.env` and fill in two values from your Supabase project dashboard:
+Then open `.env` and fill in the values below:
 
 | Variable | Where to find it |
 | --- | --- |
@@ -75,15 +76,17 @@ and click **Run**. This creates four tables (`businesses`, `customers`,
 `vehicles`, `estimates`), adds the `demo-shop` business every request falls
 back to, and turns on row level security.
 
-Then run the two Phase 6 migrations the same way, in this order:
+Then run the remaining migrations the same way, in this order:
 
 ```
 supabase/migrations/20260819000000_calls.sql
 supabase/migrations/20260819000100_estimates_vapi_call_id.sql
+supabase/migrations/20260819000200_requests.sql
 ```
 
-The first adds the `calls` table; the second lets an estimate remember which
-call produced it. All three are safe to run more than once.
+These add the `calls` table, let an estimate remember which call produced it,
+and add `appointment_requests` and `callback_requests`. All are safe to run
+more than once.
 
 ## 4. Check the database connection
 
@@ -92,12 +95,13 @@ npm run db:check
 ```
 
 This confirms the credentials work, that `demo-shop` exists, and that the
-`estimates` and `calls` tables are reachable. It prints the five most recent
-estimates and calls.
+`estimates`, `calls`, `appointment_requests`, and `callback_requests` tables
+are reachable, with counts and the five most recent rows of each.
 
 It prints no secrets and **no personal information** — calls are listed by
-Vapi call id, outcome, and follow-up flag only, never by phone number, name, or
-transcript. Nothing runs it automatically.
+Vapi call id, outcome, and follow-up flag, and requests by id and status only.
+Never a phone number, name, transcript, problem description, or reason. Nothing
+runs it automatically.
 
 ## 5. Run the server
 
@@ -218,6 +222,92 @@ an `error` string instead of `result`, so the assistant can respond naturally:
 }
 ```
 
+### Appointment and callback request tools
+
+Two more tool endpoints, behind the same `x-vapi-tool-secret` header:
+
+| Endpoint | Vapi tool name |
+| --- | --- |
+| `POST /api/vapi/tools/appointment-request` | `create_appointment_request` |
+| `POST /api/vapi/tools/callback-request` | `create_callback_request` |
+
+> **These create requests, not bookings.** Nothing in this backend can confirm
+> an appointment. A row is written with `status = 'pending'` and stays there
+> until someone at the shop acts on it. The wording returned to the assistant
+> says so explicitly, so it should never tell a caller they are booked in.
+> There is no calendar integration and no availability checking.
+
+#### `create_appointment_request`
+
+```json
+{
+  "businessId": "demo-shop",
+  "customer": { "name": "Dana", "phone": "+14085551234" },
+  "vehicle": { "year": 2019, "make": "Toyota", "model": "Camry" },
+  "service": "front_brake_pads",
+  "problemDescription": "grinding noise when braking",
+  "preferredDate": "2026-08-25",
+  "preferredTimeText": "morning"
+}
+```
+
+Every field is optional except that the request must carry **enough to be
+useful**: a `service` *or* a `problemDescription`, **and** a `preferredDate`
+*or* a `preferredTimeText`. A request with neither a reason to come in nor any
+idea of when is worse than no request at all, so it is refused with a
+tool-level error the assistant can act on.
+
+`preferredDate` must be a real `YYYY-MM-DD` date. `preferredTimeText` is free
+text on purpose — "morning", "after work", "around 2 PM" — and is stored
+verbatim. **It is never interpreted into a real time.**
+
+The result:
+
+```json
+{
+  "requestId": "...",
+  "status": "pending",
+  "message": "Appointment request recorded. The shop still needs to confirm it, so it is not booked yet.",
+  "preferredDate": "2026-08-25",
+  "preferredTimeText": "morning"
+}
+```
+
+#### `create_callback_request`
+
+```json
+{
+  "businessId": "demo-shop",
+  "customer": { "name": "Dana", "phone": "+14085551234" },
+  "reason": "Wants to discuss the quote",
+  "preferredCallbackAt": "2026-08-20T14:00:00Z"
+}
+```
+
+Everything is optional. `preferredCallbackAt`, if given, must be an ISO
+datetime **including a timezone** — a time without one is ambiguous, and
+guessing a zone would store the wrong instant.
+
+The result reports `status: "pending"` and says the request is waiting on the
+shop. It never suggests anyone has called back yet.
+
+#### Requests and customers
+
+Callers are matched exactly as they are for calls: by business and phone
+number, reusing an existing customer, creating one only when there is a real
+phone number, and filling in a missing name without ever replacing one. **No
+phone number means `customer_id` stays null** — no caller is invented.
+
+If the tool payload carries `message.call.id` it is stored as `vapi_call_id`,
+which lets the end-of-call report find the requests made during that call and
+fill in their `customer_id`.
+
+#### Retries
+
+Vapi may retry a tool call. Both tables have a partial unique index on
+`vapi_tool_call_id`, and a retry with the same tool call id returns the
+**original** `requestId` instead of creating a second row.
+
 ### Vapi events endpoint (end-of-call reports)
 
 `POST /api/vapi/events` receives Vapi's server events. It uses the **same**
@@ -244,6 +334,7 @@ A stored report returns:
 | `calls` | One row: Vapi call id, business, caller phone, start/end times, ended reason, transcript, summary, outcome, follow-up flag |
 | `customers` | The caller, matched or created — **only when a phone number is present** |
 | `estimates` | Estimates made during the call get their `customer_id` filled in, if it was blank |
+| `appointment_requests` / `callback_requests` | Same backfill: requests made during the call get their `customer_id` filled in, if it was blank |
 
 #### Customer matching
 
@@ -277,13 +368,19 @@ Deterministic, never a guess:
 | Outcome | When |
 | --- | --- |
 | `estimate_provided` | An estimate from this call is in the database |
+| `callback_requested` | A callback request row exists for this call |
+| `appointment_requested` | An appointment request row exists for this call |
 | `unresolved` | The ended reason indicates the call broke (errors, timeouts) |
-| `callback_requested` | The transcript or summary contains an explicit phrase like "call me back" |
+| `callback_requested` | *(fallback)* The transcript contains an explicit phrase like "call me back" |
 | `information_only` | There is a transcript and none of the above applies |
 | `unknown` | Not enough information |
 
-`requires_follow_up` is true for `callback_requested` and `unresolved`, false
-otherwise. There is no sentiment analysis and no urgency detection.
+Rows beat words: a stored estimate or request settles the outcome outright, and
+the phrase heuristic is only consulted when no structured request exists.
+
+`requires_follow_up` is true for `callback_requested`, `appointment_requested`,
+and `unresolved` — false otherwise. There is no sentiment analysis and no
+urgency detection.
 
 #### Pointing Vapi at this endpoint
 
@@ -299,12 +396,14 @@ value. Enable the `end-of-call-report` server message. For summaries, also
 enable Vapi's post-call analysis — this backend never calls an LLM to write
 one, and stores `null` when Vapi does not supply one.
 
-> **Privacy note.** Call records contain personal information: phone numbers,
-> names, and everything said on the call. The `calls` and `customers` tables
-> have row level security enabled with no policies, so only the server's secret
-> key can read them. Failure logs deliberately record only the Vapi call id,
-> the step, the database error code, and the business — never a phone number,
-> name, or transcript. Treat a database backup as personal data.
+> **Privacy note.** Call and request records contain personal information:
+> phone numbers, names, everything said on the call, what is wrong with
+> someone's car, and why they want a call back. The `calls`, `customers`,
+> `appointment_requests`, and `callback_requests` tables all have row level
+> security enabled with no policies, so only the server's secret key can read
+> them. Failure logs deliberately record only ids, the step, the database error
+> code, and the business — never a phone number, name, transcript, problem
+> description, or callback reason. Treat a database backup as personal data.
 >
 > **Never expose `SUPABASE_SECRET_KEY` or `VAPI_TOOL_SECRET`.** Both are
 > server-side only. Neither belongs in a browser, a frontend build, a log line,
@@ -401,6 +500,7 @@ src/
     supabase.ts          # server-only Supabase client
     estimates.ts          # estimate queries
     calls.ts               # call and customer queries
+    requests.ts            # appointment + callback request queries
   scripts/
     check-db.ts           # manual connection check (npm run db:check)
   middleware/
@@ -409,6 +509,8 @@ src/
   calls/
     normalize.ts         # end-of-call payload -> flat record, outcome rules
   routes/
+    vapiToolCall.ts      # shared Vapi tool-call envelope handling
+    vapiRequests.ts       # appointment + callback request tools
     estimate.ts          # POST /api/estimate route handler
     estimate.test.ts      # HTTP-level tests for the route
     health.ts             # GET /health route handler
@@ -420,6 +522,7 @@ src/
     estimate.ts          # Zod schema for validating the request body
     vapi.ts               # Zod schema for the Vapi tool-call envelope
     vapiEvents.ts          # Zod schema for Vapi server events
+    requests.ts             # Zod schemas for appointment/callback input
   pricing/
     catalog.ts            # hardcoded price ranges per service
     estimate.ts            # pure pricing logic (no Express, no HTTP)
@@ -428,7 +531,8 @@ src/
 
 ## What's intentionally not here yet
 
-- Appointment scheduling
+- Confirmed bookings and calendar integration (requests are captured, but
+  nothing checks availability or confirms anything)
 - SMS (Twilio)
 - Calendar booking (Google Calendar)
 - Authentication on `POST /api/estimate` (the Vapi tool endpoint *is* protected)

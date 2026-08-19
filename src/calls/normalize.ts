@@ -11,6 +11,7 @@ import type { VapiEventMessage } from "../schemas/vapiEvents.js";
 export const CALL_OUTCOMES = [
   "estimate_provided",
   "callback_requested",
+  "appointment_requested",
   "information_only",
   "unresolved",
   "unknown"
@@ -154,20 +155,37 @@ function mentionsCallback(text: string | null): boolean {
   return CALLBACK_PHRASES.some((phrase) => lowered.includes(phrase));
 }
 
+/** What the call actually produced, as recorded in the database. */
+export interface CallEvidence {
+  estimateProvided: boolean;
+  callbackRequested?: boolean;
+  appointmentRequested?: boolean;
+}
+
 /**
  * Works out what the call amounted to, using only facts we are sure of.
  *
- * The order matters. A stored estimate is hard evidence and outranks anything
- * read out of text; a broken call is next; the text heuristic is last and only
- * fires on an explicit phrase. Anything else with no transcript is "unknown"
- * rather than a guess.
+ * The order matters, and rows beat words. A stored estimate, callback request,
+ * or appointment request is hard evidence and settles the question outright;
+ * only when there is none of that do we look at how the call ended, and the
+ * phrase heuristic is the very last resort. Anything else with no transcript
+ * is "unknown" rather than a guess.
  */
 export function classifyOutcome(
   data: NormalizedCallData,
-  options: { estimateProvided: boolean }
+  evidence: CallEvidence
 ): { outcome: CallOutcome; requiresFollowUp: boolean } {
-  if (options.estimateProvided) {
+  if (evidence.estimateProvided) {
     return { outcome: "estimate_provided", requiresFollowUp: false };
+  }
+
+  if (evidence.callbackRequested) {
+    return { outcome: "callback_requested", requiresFollowUp: true };
+  }
+
+  if (evidence.appointmentRequested) {
+    // The shop has to confirm it, so somebody still has to act.
+    return { outcome: "appointment_requested", requiresFollowUp: true };
   }
 
   if (data.endedReason && FAILURE_REASON_PATTERN.test(data.endedReason)) {
@@ -175,6 +193,7 @@ export function classifyOutcome(
     return { outcome: "unresolved", requiresFollowUp: true };
   }
 
+  // Last resort: no structured request exists, so fall back to what was said.
   if (mentionsCallback(data.transcript) || mentionsCallback(data.summary)) {
     return { outcome: "callback_requested", requiresFollowUp: true };
   }
