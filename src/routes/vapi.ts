@@ -4,6 +4,7 @@ import { vapiToolCallsSchema, normalizeToolCall, type VapiToolCall } from "../sc
 import { estimateRequestSchema } from "../schemas/estimate.js";
 import { getEstimate, UnsupportedServiceError, type Estimate } from "../pricing/estimate.js";
 import { SUPPORTED_SERVICES } from "../pricing/catalog.js";
+import { persistEstimate } from "../db/estimates.js";
 
 /** The only tool this server answers today. */
 const CALCULATE_ESTIMATE = "calculate_estimate";
@@ -22,7 +23,7 @@ export const vapiRouter = Router();
  * say something sensible to the caller, so these come back inside a 200. The
  * messages are written to be read aloud, and never include internals.
  */
-function runToolCall(rawToolCall: VapiToolCall): VapiResult {
+async function runToolCall(rawToolCall: VapiToolCall): Promise<VapiResult> {
   // Flatten the flat and nested Vapi shapes into one before doing anything.
   const toolCall = normalizeToolCall(rawToolCall);
 
@@ -43,19 +44,14 @@ function runToolCall(rawToolCall: VapiToolCall): VapiResult {
     };
   }
 
-  const { service, vehicle } = parsed.data;
+  const { businessId, service, vehicle } = parsed.data;
 
+  // Step 1: price it. Nothing is stored yet, so an unsupported service leaves
+  // the database untouched.
+  let estimate: Estimate;
   try {
     // Same deterministic pricing function POST /api/estimate uses.
-    const estimate: Estimate = getEstimate(service, vehicle);
-
-    // estimateId is generated here, at the response boundary, for the same
-    // reason as in the normal route: it is tracking metadata, so keeping it out
-    // of getEstimate leaves pricing deterministic.
-    const payload = { estimateId: randomUUID(), ...estimate };
-
-    // Vapi requires result to be a string, so send compact single-line JSON.
-    return { toolCallId: toolCall.id, result: JSON.stringify(payload) };
+    estimate = getEstimate(service, vehicle);
   } catch (err) {
     if (err instanceof UnsupportedServiceError) {
       return {
@@ -65,9 +61,39 @@ function runToolCall(rawToolCall: VapiToolCall): VapiResult {
     }
     throw err;
   }
+
+  // Step 2: store it. estimateId is generated here, at the response boundary,
+  // for the same reason as in the normal route: it is tracking metadata, so
+  // keeping it out of getEstimate leaves pricing deterministic.
+  let storedEstimateId: string;
+  try {
+    const saved = await persistEstimate({
+      estimateId: randomUUID(),
+      businessId,
+      vehicle,
+      estimate,
+      source: "vapi",
+      vapiToolCallId: toolCall.id
+    });
+    // On a retry this is the id stored the first time, not the new one.
+    storedEstimateId = saved.estimateId;
+  } catch (err) {
+    console.error("[vapi] persistence failed:", (err as Error).message);
+    // A tool-level error, so the assistant can say something sensible rather
+    // than claiming an estimate that was never saved.
+    return {
+      toolCallId: toolCall.id,
+      error: "Could not save the estimate right now. Please try again in a moment."
+    };
+  }
+
+  const payload = { estimateId: storedEstimateId, ...estimate };
+
+  // Vapi requires result to be a string, so send compact single-line JSON.
+  return { toolCallId: toolCall.id, result: JSON.stringify(payload) };
 }
 
-vapiRouter.post("/estimate", (req, res) => {
+vapiRouter.post("/estimate", async (req, res) => {
   const parsed = vapiToolCallsSchema.safeParse(req.body);
 
   // If the envelope itself is unreadable there is no toolCallId to answer with,
@@ -78,7 +104,7 @@ vapiRouter.post("/estimate", (req, res) => {
     return res.status(400).json({ error: "Invalid Vapi tool-call request body." });
   }
 
-  const results = parsed.data.message.toolCallList.map(runToolCall);
+  const results = await Promise.all(parsed.data.message.toolCallList.map(runToolCall));
 
   return res.status(200).json({ results });
 });

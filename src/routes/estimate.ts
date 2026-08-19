@@ -3,13 +3,14 @@ import { Router } from "express";
 import { estimateRequestSchema } from "../schemas/estimate.js";
 import { getEstimate, UnsupportedServiceError, type Estimate } from "../pricing/estimate.js";
 import { SUPPORTED_SERVICES } from "../pricing/catalog.js";
+import { persistEstimate } from "../db/estimates.js";
 
 /** What the API sends back: the price estimate plus an ID for tracking it. */
 export type EstimateResponse = Estimate & { estimateId: string };
 
 export const estimateRouter = Router();
 
-estimateRouter.post("/estimate", (req, res) => {
+estimateRouter.post("/estimate", async (req, res) => {
   const parsed = estimateRequestSchema.safeParse(req.body);
 
   if (!parsed.success) {
@@ -19,14 +20,13 @@ estimateRouter.post("/estimate", (req, res) => {
     });
   }
 
-  // businessId is validated and defaulted here, but nothing uses it yet. It is
-  // in place so a future multi-business version has it on every request.
-  const { service, vehicle } = parsed.data;
+  const { businessId, service, vehicle } = parsed.data;
 
+  // Step 1: work out the price. Nothing is stored yet, so an unsupported
+  // service leaves the database untouched.
+  let estimate: Estimate;
   try {
-    const estimate = getEstimate(service, vehicle);
-    const response: EstimateResponse = { estimateId: randomUUID(), ...estimate };
-    return res.status(200).json(response);
+    estimate = getEstimate(service, vehicle);
   } catch (err) {
     if (err instanceof UnsupportedServiceError) {
       return res.status(400).json({
@@ -36,4 +36,20 @@ estimateRouter.post("/estimate", (req, res) => {
     }
     throw err;
   }
+
+  // Step 2: store it. The id is generated here, at the response boundary, so
+  // getEstimate stays deterministic.
+  const estimateId = randomUUID();
+
+  try {
+    await persistEstimate({ estimateId, businessId, vehicle, estimate, source: "api" });
+  } catch (err) {
+    // Log the detail for us; send the caller something safe. Never report an
+    // estimate as created when it was not stored.
+    console.error("[estimate] persistence failed:", (err as Error).message);
+    return res.status(500).json({ error: "Could not save the estimate. Please try again." });
+  }
+
+  const response: EstimateResponse = { estimateId, ...estimate };
+  return res.status(200).json(response);
 });

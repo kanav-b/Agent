@@ -1,8 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
+
+// The database is replaced with a stub, so these tests never reach the network
+// and never need Supabase credentials.
+vi.mock("../db/estimates.js", () => ({
+  persistEstimate: vi.fn()
+}));
+
 import { createApp } from "../app.js";
+import { persistEstimate } from "../db/estimates.js";
+
+const mockPersist = vi.mocked(persistEstimate);
 
 const app = createApp();
+
+beforeEach(() => {
+  mockPersist.mockReset();
+  mockPersist.mockImplementation(async (input) => ({
+    estimateId: input.estimateId,
+    reused: false
+  }));
+});
 
 const vehicle = { year: 2019, make: "Toyota", model: "Camry" };
 
@@ -120,5 +138,99 @@ describe("POST /api/estimate", () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("Invalid request body.");
+  });
+});
+
+describe("POST /api/estimate persistence", () => {
+  it("saves the estimate before responding", async () => {
+    const res = await request(app)
+      .post("/api/estimate")
+      .send({ service: "front_brake_pads", vehicle });
+
+    expect(res.status).toBe(200);
+    expect(mockPersist).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the defaulted businessId", async () => {
+    await request(app).post("/api/estimate").send({ service: "front_brake_pads", vehicle });
+
+    expect(mockPersist.mock.calls[0][0].businessId).toBe("demo-shop");
+  });
+
+  it("passes an explicit businessId through", async () => {
+    await request(app)
+      .post("/api/estimate")
+      .send({ businessId: "other-shop", service: "front_brake_pads", vehicle });
+
+    expect(mockPersist.mock.calls[0][0].businessId).toBe("other-shop");
+  });
+
+  it("passes the vehicle data", async () => {
+    await request(app).post("/api/estimate").send({ service: "front_brake_pads", vehicle });
+
+    expect(mockPersist.mock.calls[0][0].vehicle).toEqual(vehicle);
+  });
+
+  it("persists the same estimateId it returns", async () => {
+    const res = await request(app)
+      .post("/api/estimate")
+      .send({ service: "front_brake_pads", vehicle });
+
+    expect(mockPersist.mock.calls[0][0].estimateId).toBe(res.body.estimateId);
+  });
+
+  it("persists the calculated prices", async () => {
+    await request(app).post("/api/estimate").send({ service: "front_brake_pads", vehicle });
+
+    const { estimate } = mockPersist.mock.calls[0][0];
+    expect(estimate.low).toBe(300);
+    expect(estimate.high).toBe(450);
+  });
+
+  it('persists source "api"', async () => {
+    await request(app).post("/api/estimate").send({ service: "front_brake_pads", vehicle });
+
+    expect(mockPersist.mock.calls[0][0].source).toBe("api");
+  });
+
+  it("does not send a vapiToolCallId", async () => {
+    await request(app).post("/api/estimate").send({ service: "front_brake_pads", vehicle });
+
+    expect(mockPersist.mock.calls[0][0].vapiToolCallId).toBeUndefined();
+  });
+
+  it("fails with 500 and no estimate when the database fails", async () => {
+    mockPersist.mockRejectedValueOnce(new Error("connection refused"));
+
+    const res = await request(app)
+      .post("/api/estimate")
+      .send({ service: "front_brake_pads", vehicle });
+
+    expect(res.status).toBe(500);
+    expect(res.body.estimateId).toBeUndefined();
+    expect(res.body.low).toBeUndefined();
+  });
+
+  it("does not leak internal detail when the database fails", async () => {
+    mockPersist.mockRejectedValueOnce(new Error("password=hunter2 at /src/db/estimates.ts:42"));
+
+    const res = await request(app)
+      .post("/api/estimate")
+      .send({ service: "front_brake_pads", vehicle });
+
+    expect(res.body.error).toBe("Could not save the estimate. Please try again.");
+    expect(JSON.stringify(res.body)).not.toMatch(/hunter2|\.ts:/);
+  });
+
+  it("persists nothing for an unsupported service", async () => {
+    await request(app).post("/api/estimate").send({ service: "engine_rebuild", vehicle });
+
+    expect(mockPersist).not.toHaveBeenCalled();
+  });
+
+  it("persists nothing for a malformed request", async () => {
+    await request(app).post("/api/estimate").send({ service: "front_brake_pads" });
+
+    expect(mockPersist).not.toHaveBeenCalled();
   });
 });

@@ -1,9 +1,18 @@
 import { createApp } from "./app.js";
+import { getConfig } from "./config.js";
 
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+// Check the environment before starting so a missing variable is an obvious
+// message at boot rather than a confusing failure on the first request.
+let config;
+try {
+  config = getConfig();
+} catch (err) {
+  console.error(`Startup failed: ${(err as Error).message}`);
+  process.exit(1);
+}
 
 const app = createApp();
 
-app.listen(PORT, () => {
-  console.log(`Mechanic-shop receptionist API listening on port ${PORT}`);
+app.listen(config.port, () => {
+  console.log(`Mechanic-shop receptionist API listening on port ${config.port}`);
 });

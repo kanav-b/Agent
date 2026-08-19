@@ -3,14 +3,15 @@
 Backend API for an AI receptionist that gives customers a preliminary price
 estimate for common auto services.
 
-This is **phase 1**: a single endpoint, `POST /api/estimate`, backed by a
-hardcoded pricing catalog. There is no database, no phone/voice integration,
-and no authentication yet — those come later.
+Prices come from a hardcoded catalog, estimates are stored in Supabase, and a
+Vapi voice assistant can request one during a call. There is no scheduling,
+SMS, authentication, or frontend yet — those come later.
 
 ## Requirements
 
 - [Node.js](https://nodejs.org/) version 20 or newer (check with `node -v`)
 - npm (comes with Node.js)
+- A [Supabase](https://supabase.com) project (the free tier is fine)
 
 ## 1. Install dependencies
 
@@ -25,14 +26,52 @@ folder.
 
 ## 2. Set up your environment file
 
-Copy the example env file. No real secrets are needed yet, but this keeps the
-project ready for when they are:
-
 ```bash
 cp .env.example .env
 ```
 
-## 3. Run the server
+Then open `.env` and fill in two values from your Supabase project dashboard:
+
+| Variable | Where to find it |
+| --- | --- |
+| `SUPABASE_URL` | Project Settings → Data API → Project URL |
+| `SUPABASE_SECRET_KEY` | Project Settings → API Keys → **secret** key (`service_role`) |
+
+`PORT` is optional and defaults to `3000`.
+
+> **⚠️ Never commit `SUPABASE_SECRET_KEY`.**
+> This key bypasses row level security and can read and write your entire
+> database. It is server-side only: never put it in a browser, a frontend
+> build, a log line, or an API response. `.env` is gitignored — keep it that
+> way. If it ever leaks, rotate it immediately in the Supabase dashboard.
+
+The server refuses to start if either variable is missing, and tells you which
+one.
+
+## 3. Create the database tables
+
+Open your Supabase project → **SQL Editor** → **New query**. Paste the entire
+contents of:
+
+```
+supabase/migrations/20260815000000_init.sql
+```
+
+and click **Run**. This creates four tables (`businesses`, `customers`,
+`vehicles`, `estimates`), adds the `demo-shop` business every request falls
+back to, and turns on row level security. Running it more than once is safe.
+
+## 4. Check the database connection
+
+```bash
+npm run db:check
+```
+
+This confirms the credentials work, that `demo-shop` exists, and prints the
+five most recent estimates. It prints no secrets, and nothing runs it
+automatically — it is there for you to run when you want to check.
+
+## 5. Run the server
 
 For local development (auto-restarts when you edit a file):
 
@@ -46,7 +85,7 @@ You should see:
 Mechanic-shop receptionist API listening on port 3000
 ```
 
-## 4. Try it out
+## 6. Try it out
 
 In another terminal:
 
@@ -171,6 +210,40 @@ Returns `{"status":"ok"}` with HTTP 200.
 If you send a `service` that isn't in this list, you'll get a `400` response
 listing the supported services.
 
+## Pricing vs. persistence
+
+These are two separate steps, and keeping them separate is deliberate.
+
+**Pricing is deterministic.** `getEstimate()` in `src/pricing/estimate.ts` looks
+a service up in the hardcoded catalog and returns a price range. It has no
+database access, no clock, and no randomness: the same service and vehicle
+always produce the same numbers, which makes it easy to test and impossible for
+an outage to change a price.
+
+**Persistence is a side effect that happens afterwards.** Once the price is
+known, the route generates an `estimateId` and asks `src/db/estimates.ts` to
+store the result. If that write fails, the request fails — but the price it
+calculated was never in question.
+
+Put simply: the database records what an estimate was, it never decides it.
+
+### What gets stored when an estimate is created
+
+| Table | Row written |
+| --- | --- |
+| `businesses` | Nothing new — only checked that the `businessId` exists |
+| `customers` | **Nothing.** The caller is not identified yet, so no row is invented |
+| `vehicles` | One row: `business_id`, `year`, `make`, `model` (`customer_id` null) |
+| `estimates` | One row: the `estimateId`, business, vehicle, service, `low_price`, `high_price`, currency, disclaimer, `source`, and `vapi_tool_call_id` |
+
+`source` records where the estimate came from — `api` for `POST /api/estimate`,
+`vapi` for the voice tool endpoint. For Vapi calls, `vapi_tool_call_id` stores
+the tool call id, and a unique index on it means a retried tool call returns
+the original estimate instead of creating a second one.
+
+Nothing is stored when a request is rejected: unsupported services and
+malformed bodies never reach the database.
+
 ## Running tests
 
 ```bash
@@ -179,6 +252,10 @@ npm test
 
 This runs the unit tests (pricing logic) and the API route tests (using
 `supertest` to send real HTTP requests to the app in-memory).
+
+The tests replace the database layer with a stub, so they never connect to
+Supabase and never need your credentials. `npm test` is safe to run before you
+have set up a project at all.
 
 ## Type-checking
 
@@ -189,9 +266,19 @@ npm run typecheck
 ## Project structure
 
 ```
+supabase/
+  migrations/
+    20260815000000_init.sql   # the tables; paste into the Supabase SQL editor
+
 src/
   index.ts              # starts the HTTP server
   app.ts                # builds the Express app (used by both index.ts and tests)
+  config.ts             # the only place that reads process.env
+  db/
+    supabase.ts          # server-only Supabase client
+    estimates.ts          # every database query lives here
+  scripts/
+    check-db.ts           # manual connection check (npm run db:check)
   routes/
     estimate.ts          # POST /api/estimate route handler
     estimate.test.ts      # HTTP-level tests for the route
@@ -210,11 +297,12 @@ src/
 
 ## What's intentionally not here yet
 
-- Database / persistence
-- Voice integration (Vapi)
-- Phone integration (Twilio)
+- Caller identity (customer name and phone are never captured, so `customers`
+  stays empty and `customer_id` is always null)
+- Appointment scheduling
+- SMS (Twilio)
 - Calendar booking (Google Calendar)
-- Authentication
+- Authentication on any endpoint, including the Vapi tool endpoint
 - Frontend
 
 These will be added in later phases.

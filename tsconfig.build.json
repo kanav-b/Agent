@@ -1,7 +1,8 @@
-// Used only by `npm run build`. It is the same as tsconfig.json but leaves the
-// test files out, so dist/ contains just the code the server actually runs.
-// `npm run typecheck` still uses tsconfig.json, which does check the tests.
+// Used only by `npm run build`. It is the same as tsconfig.json but leaves out
+// the tests and the manual scripts, so dist/ contains just the code the server
+// actually runs. `npm run typecheck` still uses tsconfig.json, which checks
+// everything.
 {
   "extends": "./tsconfig.json",
-  "exclude": ["src/**/*.test.ts"]
+  "exclude": ["src/**/*.test.ts", "src/scripts/**"]
 }
