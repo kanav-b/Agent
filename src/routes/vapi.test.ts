@@ -9,8 +9,15 @@ vi.mock("../db/estimates.js", () => ({
 
 import { createApp } from "../app.js";
 import { persistEstimate } from "../db/estimates.js";
+import { VAPI_SECRET_HEADER } from "../middleware/vapiAuth.js";
 
 const mockPersist = vi.mocked(persistEstimate);
+
+// A fake secret for tests only. The real one lives in .env and is never here.
+const TEST_SECRET = "test-vapi-secret-not-real";
+process.env.SUPABASE_URL = "https://test.invalid";
+process.env.SUPABASE_SECRET_KEY = "test-supabase-key-not-real";
+process.env.VAPI_TOOL_SECRET = TEST_SECRET;
 
 const app = createApp();
 
@@ -23,6 +30,10 @@ beforeEach(() => {
 });
 
 const ROUTE = "/api/vapi/tools/estimate";
+
+/** Posts an authorised Vapi tool call. Auth itself is tested separately. */
+const postTool = (body: object) =>
+  request(app).post(ROUTE).set(VAPI_SECRET_HEADER, TEST_SECRET).send(body);
 
 const vehicle = { year: 2019, make: "Toyota", model: "Camry" };
 
@@ -45,7 +56,7 @@ const validCall = envelope({
 
 describe("POST /api/vapi/tools/estimate", () => {
   it("handles a successful calculate_estimate call", async () => {
-    const res = await request(app).post(ROUTE).send(validCall);
+    const res = await postTool(validCall);
 
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.results)).toBe(true);
@@ -53,15 +64,13 @@ describe("POST /api/vapi/tools/estimate", () => {
   });
 
   it("echoes back the same toolCallId", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(envelope({ arguments: { service: "front_brake_pads", vehicle } }, { id: "call_abc_789" }));
+    const res = await postTool(envelope({ arguments: { service: "front_brake_pads", vehicle } }, { id: "call_abc_789" }));
 
     expect(res.body.results[0].toolCallId).toBe("call_abc_789");
   });
 
   it("returns result as a single-line string", async () => {
-    const res = await request(app).post(ROUTE).send(validCall);
+    const res = await postTool(validCall);
     const { result } = res.body.results[0];
 
     expect(typeof result).toBe("string");
@@ -69,13 +78,13 @@ describe("POST /api/vapi/tools/estimate", () => {
   });
 
   it("returns a result string that parses as JSON", async () => {
-    const res = await request(app).post(ROUTE).send(validCall);
+    const res = await postTool(validCall);
 
     expect(() => JSON.parse(res.body.results[0].result)).not.toThrow();
   });
 
   it("includes an estimateId in the parsed result", async () => {
-    const res = await request(app).post(ROUTE).send(validCall);
+    const res = await postTool(validCall);
     const parsed = JSON.parse(res.body.results[0].result);
 
     expect(parsed.estimateId).toBeTypeOf("string");
@@ -83,7 +92,7 @@ describe("POST /api/vapi/tools/estimate", () => {
   });
 
   it("returns low 300 and high 450 for front_brake_pads", async () => {
-    const res = await request(app).post(ROUTE).send(validCall);
+    const res = await postTool(validCall);
     const parsed = JSON.parse(res.body.results[0].result);
 
     expect(parsed.low).toBe(300);
@@ -91,14 +100,14 @@ describe("POST /api/vapi/tools/estimate", () => {
   });
 
   it("includes the expected disclaimer", async () => {
-    const res = await request(app).post(ROUTE).send(validCall);
+    const res = await postTool(validCall);
     const parsed = JSON.parse(res.body.results[0].result);
 
     expect(parsed.disclaimer).toBe("Final pricing is subject to vehicle inspection.");
   });
 
   it("matches the prices returned by POST /api/estimate", async () => {
-    const viaVapi = await request(app).post(ROUTE).send(validCall);
+    const viaVapi = await postTool(validCall);
     const viaRest = await request(app)
       .post("/api/estimate")
       .send({ service: "front_brake_pads", vehicle });
@@ -109,27 +118,21 @@ describe("POST /api/vapi/tools/estimate", () => {
   });
 
   it("also accepts arguments sent as `parameters`", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(envelope({ parameters: { service: "front_brake_pads", vehicle } }));
+    const res = await postTool(envelope({ parameters: { service: "front_brake_pads", vehicle } }));
 
     const parsed = JSON.parse(res.body.results[0].result);
     expect(parsed.low).toBe(300);
   });
 
   it("works without businessId", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(envelope({ arguments: { service: "front_brake_pads", vehicle } }));
+    const res = await postTool(envelope({ arguments: { service: "front_brake_pads", vehicle } }));
 
     expect(res.status).toBe(200);
     expect(res.body.results[0].result).toBeTypeOf("string");
   });
 
   it("returns 200 with a tool-level error for an unsupported service", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(envelope({ arguments: { service: "engine_rebuild", vehicle } }));
+    const res = await postTool(envelope({ arguments: { service: "engine_rebuild", vehicle } }));
 
     expect(res.status).toBe(200);
     expect(res.body.results[0].toolCallId).toBe("call_123");
@@ -138,9 +141,7 @@ describe("POST /api/vapi/tools/estimate", () => {
   });
 
   it("returns 200 with a tool-level error for malformed parameters", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(envelope({ arguments: { service: "front_brake_pads" } }));
+    const res = await postTool(envelope({ arguments: { service: "front_brake_pads" } }));
 
     expect(res.status).toBe(200);
     expect(res.body.results[0].toolCallId).toBe("call_123");
@@ -148,9 +149,7 @@ describe("POST /api/vapi/tools/estimate", () => {
   });
 
   it("returns 200 with a tool-level error for an unsupported tool name", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(
+    const res = await postTool(
         envelope(
           { arguments: { service: "front_brake_pads", vehicle } },
           { name: "book_appointment" }
@@ -163,41 +162,33 @@ describe("POST /api/vapi/tools/estimate", () => {
   });
 
   it("never leaks internals in an error message", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(envelope({ arguments: { service: "engine_rebuild", vehicle } }));
+    const res = await postTool(envelope({ arguments: { service: "engine_rebuild", vehicle } }));
 
     const { error } = res.body.results[0];
     expect(error).not.toMatch(/at \/|\.ts:|Error:/);
   });
 
   it("rejects a malformed envelope with no usable toolCallId", async () => {
-    const res = await request(app).post(ROUTE).send({ nonsense: true });
+    const res = await postTool({ nonsense: true });
 
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("Invalid Vapi tool-call request body.");
   });
 
   it("rejects an envelope with the wrong message type", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send({ message: { type: "status-update", toolCallList: [] } });
+    const res = await postTool({ message: { type: "status-update", toolCallList: [] } });
 
     expect(res.status).toBe(400);
   });
 
   it("rejects an envelope with an empty toolCallList", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send({ message: { type: "tool-calls", toolCallList: [] } });
+    const res = await postTool({ message: { type: "tool-calls", toolCallList: [] } });
 
     expect(res.status).toBe(400);
   });
 
   it("rejects a tool call with no name in either position", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send({
+    const res = await postTool({
         message: {
           type: "tool-calls",
           toolCallList: [{ id: "call_123", arguments: { service: "front_brake_pads", vehicle } }]
@@ -208,9 +199,7 @@ describe("POST /api/vapi/tools/estimate", () => {
   });
 
   it("ignores extra Vapi fields such as toolWithToolCallList", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send({
+    const res = await postTool({
         message: {
           timestamp: 1678901234567,
           type: "tool-calls",
@@ -248,9 +237,7 @@ describe("POST /api/vapi/tools/estimate (nested function shape)", () => {
   }
 
   it("reads the tool name from function.name", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(
+    const res = await postTool(
         nestedEnvelope({
           name: "calculate_estimate",
           arguments: { service: "front_brake_pads", vehicle }
@@ -262,9 +249,7 @@ describe("POST /api/vapi/tools/estimate (nested function shape)", () => {
   });
 
   it("reads an object from function.arguments", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(
+    const res = await postTool(
         nestedEnvelope({
           name: "calculate_estimate",
           arguments: { businessId: "demo-shop", service: "front_brake_pads", vehicle }
@@ -278,9 +263,7 @@ describe("POST /api/vapi/tools/estimate (nested function shape)", () => {
   });
 
   it("reads a JSON string from function.arguments", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(
+    const res = await postTool(
         nestedEnvelope({
           name: "calculate_estimate",
           arguments: JSON.stringify({ service: "front_brake_pads", vehicle })
@@ -294,9 +277,7 @@ describe("POST /api/vapi/tools/estimate (nested function shape)", () => {
   });
 
   it("echoes the correct toolCallId for the nested shape", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(
+    const res = await postTool(
         nestedEnvelope(
           { name: "calculate_estimate", arguments: { service: "front_brake_pads", vehicle } },
           "call_nested_456"
@@ -307,9 +288,7 @@ describe("POST /api/vapi/tools/estimate (nested function shape)", () => {
   });
 
   it("returns a tool-level error for an unsupported nested tool name", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(nestedEnvelope({ name: "book_appointment", arguments: { service: "front_brake_pads", vehicle } }));
+    const res = await postTool(nestedEnvelope({ name: "book_appointment", arguments: { service: "front_brake_pads", vehicle } }));
 
     expect(res.status).toBe(200);
     expect(res.body.results[0].toolCallId).toBe("call_123");
@@ -317,9 +296,7 @@ describe("POST /api/vapi/tools/estimate (nested function shape)", () => {
   });
 
   it("returns a tool-level error for an unsupported nested service", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(
+    const res = await postTool(
         nestedEnvelope({ name: "calculate_estimate", arguments: { service: "engine_rebuild", vehicle } })
       );
 
@@ -328,9 +305,7 @@ describe("POST /api/vapi/tools/estimate (nested function shape)", () => {
   });
 
   it("returns a tool-level error for unparseable JSON-string arguments", async () => {
-    const res = await request(app)
-      .post(ROUTE)
-      .send(nestedEnvelope({ name: "calculate_estimate", arguments: "{not valid json" }));
+    const res = await postTool(nestedEnvelope({ name: "calculate_estimate", arguments: "{not valid json" }));
 
     expect(res.status).toBe(200);
     expect(res.body.results[0].error).toMatch(/Invalid estimate parameters/);
@@ -353,9 +328,7 @@ describe("POST /api/vapi/tools/estimate (nested function shape)", () => {
       }
     };
 
-    const res = await request(app)
-      .post(ROUTE)
-      .send({ message: { type: "tool-calls", toolCalls: [toolCall], toolCallList: [toolCall] } });
+    const res = await postTool({ message: { type: "tool-calls", toolCalls: [toolCall], toolCallList: [toolCall] } });
 
     expect(res.status).toBe(200);
     expect(res.body.results).toHaveLength(1);
@@ -368,12 +341,10 @@ describe("POST /api/vapi/tools/estimate (nested function shape)", () => {
   });
 
   it("gives the same prices as the flat shape", async () => {
-    const nested = await request(app)
-      .post(ROUTE)
-      .send(
+    const nested = await postTool(
         nestedEnvelope({ name: "calculate_estimate", arguments: { service: "front_brake_pads", vehicle } })
       );
-    const flat = await request(app).post(ROUTE).send(validCall);
+    const flat = await postTool(validCall);
 
     const fromNested = JSON.parse(nested.body.results[0].result);
     const fromFlat = JSON.parse(flat.body.results[0].result);
@@ -385,28 +356,26 @@ describe("POST /api/vapi/tools/estimate (nested function shape)", () => {
 
 describe("POST /api/vapi/tools/estimate persistence", () => {
   it("saves the estimate before replying to Vapi", async () => {
-    const res = await request(app).post(ROUTE).send(validCall);
+    const res = await postTool(validCall);
 
     expect(res.status).toBe(200);
     expect(mockPersist).toHaveBeenCalledTimes(1);
   });
 
   it('persists source "vapi"', async () => {
-    await request(app).post(ROUTE).send(validCall);
+    await postTool(validCall);
 
     expect(mockPersist.mock.calls[0][0].source).toBe("vapi");
   });
 
   it("persists the Vapi toolCallId", async () => {
-    await request(app)
-      .post(ROUTE)
-      .send(envelope({ arguments: { service: "front_brake_pads", vehicle } }, { id: "call_xyz_1" }));
+    await postTool(envelope({ arguments: { service: "front_brake_pads", vehicle } }, { id: "call_xyz_1" }));
 
     expect(mockPersist.mock.calls[0][0].vapiToolCallId).toBe("call_xyz_1");
   });
 
   it("passes the businessId and vehicle", async () => {
-    await request(app).post(ROUTE).send(validCall);
+    await postTool(validCall);
 
     const input = mockPersist.mock.calls[0][0];
     expect(input.businessId).toBe("demo-shop");
@@ -414,7 +383,7 @@ describe("POST /api/vapi/tools/estimate persistence", () => {
   });
 
   it("persists the same estimateId it returns", async () => {
-    const res = await request(app).post(ROUTE).send(validCall);
+    const res = await postTool(validCall);
 
     const returned = JSON.parse(res.body.results[0].result).estimateId;
     expect(mockPersist.mock.calls[0][0].estimateId).toBe(returned);
@@ -423,7 +392,7 @@ describe("POST /api/vapi/tools/estimate persistence", () => {
   it("returns the stored estimateId when a retry is detected", async () => {
     mockPersist.mockResolvedValueOnce({ estimateId: "original-id-from-first-call", reused: true });
 
-    const res = await request(app).post(ROUTE).send(validCall);
+    const res = await postTool(validCall);
 
     expect(JSON.parse(res.body.results[0].result).estimateId).toBe("original-id-from-first-call");
   });
@@ -431,7 +400,7 @@ describe("POST /api/vapi/tools/estimate persistence", () => {
   it("returns HTTP 200 with a tool-level error when the database fails", async () => {
     mockPersist.mockRejectedValueOnce(new Error("connection refused"));
 
-    const res = await request(app).post(ROUTE).send(validCall);
+    const res = await postTool(validCall);
 
     expect(res.status).toBe(200);
     expect(res.body.results[0].toolCallId).toBe("call_123");
@@ -442,37 +411,31 @@ describe("POST /api/vapi/tools/estimate persistence", () => {
   it("does not leak internal detail when the database fails", async () => {
     mockPersist.mockRejectedValueOnce(new Error("password=hunter2 at /src/db/estimates.ts:42"));
 
-    const res = await request(app).post(ROUTE).send(validCall);
+    const res = await postTool(validCall);
 
     expect(JSON.stringify(res.body)).not.toMatch(/hunter2|\.ts:/);
   });
 
   it("persists nothing for an unsupported service", async () => {
-    await request(app)
-      .post(ROUTE)
-      .send(envelope({ arguments: { service: "engine_rebuild", vehicle } }));
+    await postTool(envelope({ arguments: { service: "engine_rebuild", vehicle } }));
 
     expect(mockPersist).not.toHaveBeenCalled();
   });
 
   it("persists nothing for an unsupported tool name", async () => {
-    await request(app)
-      .post(ROUTE)
-      .send(envelope({ arguments: { service: "front_brake_pads", vehicle } }, { name: "book_appointment" }));
+    await postTool(envelope({ arguments: { service: "front_brake_pads", vehicle } }, { name: "book_appointment" }));
 
     expect(mockPersist).not.toHaveBeenCalled();
   });
 
   it("persists nothing for malformed parameters", async () => {
-    await request(app)
-      .post(ROUTE)
-      .send(envelope({ arguments: { service: "front_brake_pads" } }));
+    await postTool(envelope({ arguments: { service: "front_brake_pads" } }));
 
     expect(mockPersist).not.toHaveBeenCalled();
   });
 
   it("persists nothing for a malformed envelope", async () => {
-    await request(app).post(ROUTE).send({ nonsense: true });
+    await postTool({ nonsense: true });
 
     expect(mockPersist).not.toHaveBeenCalled();
   });

@@ -43,10 +43,7 @@ estimateRouter.post("/estimate", async (req, res) => {
 
   try {
     await persistEstimate({ estimateId, businessId, vehicle, estimate, source: "api" });
-  } catch (err) {
-    // Log the detail for us; send the caller something safe. Never report an
-    // estimate as created when it was not stored.
-    console.error("[estimate] persistence failed:", (err as Error).message);
+  } catch {
     return res.status(500).json({ error: "Could not save the estimate. Please try again." });
   }
 

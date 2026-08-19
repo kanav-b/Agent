@@ -77,8 +77,7 @@ async function runToolCall(rawToolCall: VapiToolCall): Promise<VapiResult> {
     });
     // On a retry this is the id stored the first time, not the new one.
     storedEstimateId = saved.estimateId;
-  } catch (err) {
-    console.error("[vapi] persistence failed:", (err as Error).message);
+  } catch {
     // A tool-level error, so the assistant can say something sensible rather
     // than claiming an estimate that was never saved.
     return {

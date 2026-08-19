@@ -10,6 +10,7 @@ export interface Config {
   port: number;
   supabaseUrl: string;
   supabaseSecretKey: string;
+  vapiToolSecret: string;
 }
 
 let cached: Config | undefined;
@@ -36,10 +37,12 @@ export function getConfig(): Config {
 
   const supabaseUrl = process.env.SUPABASE_URL?.trim();
   const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY?.trim();
+  const vapiToolSecret = process.env.VAPI_TOOL_SECRET?.trim();
 
   const missing: string[] = [];
   if (!supabaseUrl) missing.push("SUPABASE_URL");
   if (!supabaseSecretKey) missing.push("SUPABASE_SECRET_KEY");
+  if (!vapiToolSecret) missing.push("VAPI_TOOL_SECRET");
 
   if (missing.length > 0) {
     // Names only — never the values.
@@ -52,7 +55,8 @@ export function getConfig(): Config {
   cached = {
     port: process.env.PORT ? Number(process.env.PORT) : 3000,
     supabaseUrl: supabaseUrl as string,
-    supabaseSecretKey: supabaseSecretKey as string
+    supabaseSecretKey: supabaseSecretKey as string,
+    vapiToolSecret: vapiToolSecret as string
   };
 
   return cached;

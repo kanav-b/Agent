@@ -60,16 +60,14 @@ export interface PersistEstimateResult {
 const UNIQUE_VIOLATION = "23505";
 
 /* ------------------------------------------------------------------ *
- * TEMPORARY DIAGNOSTICS
+ * FAILURE LOGGING
  *
- * Added to find out which persistence step is failing. Logs the step,
- * the Supabase code/message/details/hint, and the ids involved.
+ * A persistence failure logs one line naming the step that broke and
+ * the Supabase code/message/details/hint, along with the ids involved.
+ * Successful writes log nothing, so normal traffic stays quiet.
  *
  * It never logs the Supabase URL, the secret key, or any header — the
  * fields below are the only ones written out.
- *
- * Remove this block (and the logStep/logFailure calls) once the cause
- * is found.
  * ------------------------------------------------------------------ */
 
 interface LogContext {
@@ -84,15 +82,6 @@ function field(name: string, value: string | undefined): string {
     return `${name}=-`;
   }
   return `${name}=${JSON.stringify(value)}`;
-}
-
-function logStep(step: PersistenceStep, status: "start" | "ok", context: LogContext): void {
-  console.log(
-    `[db] step=${step} status=${status} ` +
-      `${field("businessId", context.businessId)} ` +
-      `${field("service", context.service)} ` +
-      `${field("estimateId", context.estimateId)}`
-  );
 }
 
 function logFailure(err: unknown, context: LogContext): void {
@@ -121,7 +110,7 @@ function logFailure(err: unknown, context: LogContext): void {
   );
 }
 
-/* ------------------------- end diagnostics ------------------------- */
+/* ----------------------- end failure logging ----------------------- */
 
 /** Throws if the business is not in the database. */
 export async function ensureBusinessExists(businessId: string): Promise<void> {
@@ -234,24 +223,17 @@ export async function persistEstimate(
 
   try {
     if (input.vapiToolCallId) {
-      logStep("findEstimateByToolCallId", "start", context);
       const existing = await findEstimateByToolCallId(input.vapiToolCallId);
-      logStep("findEstimateByToolCallId", "ok", context);
 
       if (existing) {
         return { estimateId: existing, reused: true };
       }
     }
 
-    logStep("ensureBusinessExists", "start", context);
     await ensureBusinessExists(input.businessId);
-    logStep("ensureBusinessExists", "ok", context);
 
-    logStep("createVehicle", "start", context);
     const vehicleId = await createVehicle(input.businessId, input.vehicle);
-    logStep("createVehicle", "ok", context);
 
-    logStep("saveEstimate", "start", context);
     try {
       await saveEstimate(input, vehicleId);
     } catch (err) {
@@ -264,7 +246,6 @@ export async function persistEstimate(
       }
       throw err;
     }
-    logStep("saveEstimate", "ok", context);
 
     return { estimateId: input.estimateId, reused: false };
   } catch (err) {

@@ -4,8 +4,9 @@ Backend API for an AI receptionist that gives customers a preliminary price
 estimate for common auto services.
 
 Prices come from a hardcoded catalog, estimates are stored in Supabase, and a
-Vapi voice assistant can request one during a call. There is no scheduling,
-SMS, authentication, or frontend yet — those come later.
+Vapi voice assistant can request one during a call. The Vapi tool endpoint is
+protected by a shared secret. There is no scheduling, SMS, or frontend yet —
+those come later.
 
 ## Requirements
 
@@ -36,8 +37,20 @@ Then open `.env` and fill in two values from your Supabase project dashboard:
 | --- | --- |
 | `SUPABASE_URL` | Project Settings → Data API → Project URL |
 | `SUPABASE_SECRET_KEY` | Project Settings → API Keys → **secret** key (`service_role`) |
+| `VAPI_TOOL_SECRET` | You choose it — see below |
 
 `PORT` is optional and defaults to `3000`.
+
+`VAPI_TOOL_SECRET` is a shared password between this server and Vapi. Generate
+one:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+Put it in `.env`, then set the same value in the Vapi dashboard as a custom
+header on the tool: `x-vapi-tool-secret`. Requests without it are rejected with
+`401` before any pricing or database work happens.
 
 > **⚠️ Never commit `SUPABASE_SECRET_KEY`.**
 > This key bypasses row level security and can read and write your entire
@@ -45,8 +58,8 @@ Then open `.env` and fill in two values from your Supabase project dashboard:
 > build, a log line, or an API response. `.env` is gitignored — keep it that
 > way. If it ever leaks, rotate it immediately in the Supabase dashboard.
 
-The server refuses to start if either variable is missing, and tells you which
-one.
+The server refuses to start if any required variable is missing, and tells you
+which ones.
 
 ## 3. Create the database tables
 
@@ -135,7 +148,9 @@ curl -X POST http://localhost:3000/api/estimate \
 
 ### Vapi tool endpoint
 
-`POST /api/vapi/tools/estimate` is an adapter for a Vapi custom tool. It speaks
+`POST /api/vapi/tools/estimate` is an adapter for a Vapi custom tool. It
+requires the `x-vapi-tool-secret` header (see `VAPI_TOOL_SECRET` above);
+without it the request is rejected with `401 {"error":"Unauthorized."}`. It speaks
 Vapi's envelope format, but it does **not** calculate anything itself — it
 calls the exact same pricing code as `POST /api/estimate`, so both routes
 always agree on price.
@@ -146,6 +161,7 @@ shape as the normal estimate request body.
 ```bash
 curl -X POST http://localhost:3000/api/vapi/tools/estimate \
   -H "Content-Type: application/json" \
+  -H "x-vapi-tool-secret: $VAPI_TOOL_SECRET" \
   -d '{
     "message": {
       "type": "tool-calls",
@@ -279,6 +295,9 @@ src/
     estimates.ts          # every database query lives here
   scripts/
     check-db.ts           # manual connection check (npm run db:check)
+  middleware/
+    vapiAuth.ts          # shared-secret check for the Vapi endpoint
+    errors.ts             # JSON 404 / 500 handling, no stack traces
   routes/
     estimate.ts          # POST /api/estimate route handler
     estimate.test.ts      # HTTP-level tests for the route
@@ -302,7 +321,7 @@ src/
 - Appointment scheduling
 - SMS (Twilio)
 - Calendar booking (Google Calendar)
-- Authentication on any endpoint, including the Vapi tool endpoint
+- Authentication on `POST /api/estimate` (the Vapi tool endpoint *is* protected)
 - Frontend
 
 These will be added in later phases.
