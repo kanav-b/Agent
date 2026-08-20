@@ -6,14 +6,17 @@ estimate for common auto services.
 Prices come from a hardcoded catalog, estimates are stored in Supabase, and a
 Vapi voice assistant can request one during a call. The assistant can also
 record appointment and callback **requests** — which the shop still has to act
-on, since nothing here confirms a booking. All Vapi endpoints are protected by
-a shared secret. There is no calendar, SMS, or frontend yet.
+on, since nothing here confirms a booking — and the shop is texted when one
+arrives. All Vapi endpoints are protected by a shared secret. There is no
+calendar or frontend yet.
 
 ## Requirements
 
 - [Node.js](https://nodejs.org/) version 20 or newer (check with `node -v`)
 - npm (comes with Node.js)
 - A [Supabase](https://supabase.com) project (the free tier is fine)
+- A [Twilio](https://www.twilio.com/) account with an SMS-capable number —
+  optional; without it everything works except sending texts
 
 ## 1. Install dependencies
 
@@ -39,6 +42,11 @@ Then open `.env` and fill in the values below:
 | `SUPABASE_URL` | Project Settings → Data API → Project URL |
 | `SUPABASE_SECRET_KEY` | Project Settings → API Keys → **secret** key (`service_role`) |
 | `VAPI_TOOL_SECRET` | You choose it — see below |
+| `TWILIO_ACCOUNT_SID` | Twilio Console → Account Info |
+| `TWILIO_AUTH_TOKEN` | Twilio Console → Account Info (a credential) |
+| `TWILIO_FROM_NUMBER` | An SMS-capable Twilio number, E.164 (`+14155550123`) |
+| `SHOP_NOTIFICATION_NUMBER` | Where shop alerts go, E.164 |
+| `SMS_ENABLED` | `true` or `false` — **defaults to `false`** |
 
 `PORT` is optional and defaults to `3000`.
 
@@ -54,14 +62,46 @@ header — on the tool **and** on the server URL: `x-vapi-tool-secret`. Requests
 without it are rejected with `401` before any pricing or database work happens.
 One secret covers both Vapi endpoints.
 
-> **⚠️ Never commit `SUPABASE_SECRET_KEY`.**
-> This key bypasses row level security and can read and write your entire
-> database. It is server-side only: never put it in a browser, a frontend
-> build, a log line, or an API response. `.env` is gitignored — keep it that
-> way. If it ever leaks, rotate it immediately in the Supabase dashboard.
+> **⚠️ Never commit `SUPABASE_SECRET_KEY` or `TWILIO_AUTH_TOKEN`.**
+> The Supabase key bypasses row level security and can read and write your
+> entire database; the Twilio token can send messages and spend money. Both are
+> server-side only: never put them in a browser, a frontend build, a log line,
+> or an API response. `.env` is gitignored — keep it that way. If either leaks,
+> rotate it immediately in the relevant dashboard.
 
-The server refuses to start if any required variable is missing, and tells you
-which ones.
+The server refuses to start if `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, or
+`VAPI_TOOL_SECRET` is missing, and tells you which ones.
+
+**SMS is off unless you turn it on.** `SMS_ENABLED` defaults to `false`, and
+having Twilio credentials set is *not* enough on its own — the switch must say
+`true`. Anything other than `true` or `false` stops the server with a clear
+message rather than being guessed at.
+
+**The four Twilio variables are optional.** Without them the server starts
+normally; estimates, calls, appointment requests, and callback requests all
+keep working. `npm run db:check` never needs them.
+
+Startup says which state you are in:
+
+| State | At startup | Notification results |
+| --- | --- | --- |
+| `SMS_ENABLED=false` | `SMS notifications are disabled.` | `disabled` |
+| `SMS_ENABLED=true`, credentials missing | a warning naming the missing variables | `not_configured` |
+| `SMS_ENABLED=true`, credentials present | nothing | `sent` / `failed` |
+
+A missing or broken SMS setup never takes the receptionist down: the phone line
+keeps working and requests keep being recorded.
+
+### Twilio setup
+
+1. Create a [Twilio](https://www.twilio.com/) account.
+2. Buy or use an **SMS-capable** phone number — that becomes
+   `TWILIO_FROM_NUMBER`.
+3. Copy the Account SID and Auth Token from the console.
+4. Set `SHOP_NOTIFICATION_NUMBER` to the shop's mobile — the number that should
+   receive alerts. It is not a caller's number.
+5. On a Twilio trial account you can only text **verified** numbers, so verify
+   the shop number before testing.
 
 ## 3. Create the database tables
 
@@ -82,11 +122,13 @@ Then run the remaining migrations the same way, in this order:
 supabase/migrations/20260819000000_calls.sql
 supabase/migrations/20260819000100_estimates_vapi_call_id.sql
 supabase/migrations/20260819000200_requests.sql
+supabase/migrations/20260819000300_notifications.sql
+supabase/migrations/20260819000400_sms_consent.sql
 ```
 
 These add the `calls` table, let an estimate remember which call produced it,
-and add `appointment_requests` and `callback_requests`. All are safe to run
-more than once.
+add `appointment_requests` and `callback_requests`, add `notifications`, and
+add the SMS consent columns. All are safe to run more than once.
 
 ## 4. Check the database connection
 
@@ -95,13 +137,15 @@ npm run db:check
 ```
 
 This confirms the credentials work, that `demo-shop` exists, and that the
-`estimates`, `calls`, `appointment_requests`, and `callback_requests` tables
-are reachable, with counts and the five most recent rows of each.
+`estimates`, `calls`, `appointment_requests`, `callback_requests`, and
+`notifications` tables are reachable, with counts and the five most recent rows
+of each. It needs Supabase but **not** Twilio.
 
 It prints no secrets and **no personal information** — calls are listed by
 Vapi call id, outcome, and follow-up flag, and requests by id and status only.
-Never a phone number, name, transcript, problem description, or reason. Nothing
-runs it automatically.
+Notifications are listed by type, recipient, and status. Never a phone number,
+name, transcript, problem description, reason, or message text. Nothing runs it
+automatically.
 
 ## 5. Run the server
 
@@ -308,6 +352,144 @@ Vapi may retry a tool call. Both tables have a partial unique index on
 `vapi_tool_call_id`, and a retry with the same tool call id returns the
 **original** `requestId` instead of creating a second row.
 
+### SMS notifications
+
+When a request is stored, the shop is texted. The caller is texted **only if
+they explicitly agreed on the call**.
+
+> **⚠️ A request can be recorded even when SMS delivery fails.** Storing the
+> request is the real action; texting is a notification about it. A failed
+> message never deletes, rolls back, or invalidates a request — it is recorded
+> as `failed` in `notifications` and the tool still reports the request as
+> recorded. If Twilio is down, requests keep arriving and the shop must check
+> the system rather than rely on the alert.
+
+#### Shop alerts
+
+Sent to `SHOP_NOTIFICATION_NUMBER` for every appointment and callback request.
+They carry the vehicle, service or problem, preferred date/time, and — because
+the shop is the intended recipient and needs to ring people back — the caller's
+name and number when known. They never contain a transcript, and they never
+describe anything as booked or confirmed.
+
+#### Caller confirmations are opt-in
+
+Both tools take an optional `customerSmsConsent` boolean, defaulting to
+`false`. A text is sent to the caller **only** when all of these hold:
+
+1. `customerSmsConsent` is `true`
+2. a phone number was supplied
+3. the request was stored successfully
+
+**Having someone's phone number is not consent, and neither is silence.** The
+assistant must set this to `true` only after the caller explicitly says yes on
+that call.
+
+When it is `true`, the server records evidence on the request row:
+
+| Column | Value |
+| --- | --- |
+| `customer_sms_consent` | `true` |
+| `customer_sms_consent_at` | the **server's** timestamp |
+| `customer_sms_consent_method` | `voice` |
+| `customer_sms_consent_scope` | `request_confirmation` |
+
+The timestamp, method, and scope are decided by the server and cannot be set by
+the tool — a caller-supplied "I consented at 9am" would be worthless as proof.
+When consent is not given, the flag is `false` and the other three stay null. A
+database constraint enforces both directions: `true` must carry all three, and
+`false` must carry none of them, so a row can never keep stale evidence of a
+consent that no longer applies.
+
+Consent is recorded even when SMS is switched off, so turning it on later does
+not retrospectively invent permission.
+
+> **What this consent covers.** One confirmation text, about the one request it
+> was given for. It is **not** marketing consent, **not** account-wide, **not**
+> consent for future requests, and **not** consent for any other kind of
+> message. Nothing in this system reuses it.
+
+Caller-facing wording:
+
+- **Appointment** — *"Demo Auto Repair: We received your appointment request
+  for 2026-08-25 morning. This is not a confirmed appointment. The shop will
+  follow up to confirm."*
+- **Callback** — *"Demo Auto Repair: We received your callback request. It is
+  pending until someone from the shop follows up."* A preferred time is echoed
+  back as a preference, never as a promise.
+
+#### Notification status in the tool result
+
+```json
+{
+  "requestId": "...",
+  "status": "pending",
+  "message": "Appointment request recorded. The shop still needs to confirm it, so it is not booked yet.",
+  "shopNotification": "sent",
+  "customerConfirmation": "not_requested"
+}
+```
+
+| Value | Meaning |
+| --- | --- |
+| `sent` | The provider accepted the message |
+| `failed` | Delivery was attempted and rejected |
+| `not_requested` | The caller did not consent (customer only) |
+| `no_phone` | Consent given but no number (customer only) |
+| `disabled` | `SMS_ENABLED` is not `true`; nothing was attempted |
+| `not_configured` | SMS is on but Twilio is not set up; nothing was attempted |
+
+Consent always takes precedence over the delivery state: no consent gives
+`not_requested`, and consent without a phone number gives `no_phone`.
+`disabled` and `not_configured` appear only when a message would otherwise
+have been sent. **`failed` is never used for something deliberately switched
+off.**
+
+**Only `sent` means a text went out.** The assistant must never tell a caller a
+confirmation was sent unless `customerConfirmation` is exactly `sent`.
+
+#### Vapi dashboard: add the consent parameter
+
+Add one optional boolean parameter to **both** existing tools:
+
+```
+customerSmsConsent   boolean   optional
+```
+
+Description to give the model: *"True only if the caller explicitly agreed to
+receive a confirmation text about this request. Never infer this from the fact
+that you have their phone number."*
+
+`calculate_estimate` is unchanged.
+
+#### Assistant rules worth adding to the system prompt
+
+- When you have a phone number and it feels natural, you may ask: *"Would you
+  like a text confirming that I recorded the request?"*
+- Set `customerSmsConsent=true` **only** after an explicit yes. A phone number
+  is not consent, and silence is not consent.
+- Never pressure the caller. If they say no, carry on normally — consent is not
+  needed to save the request.
+- Do not ask at all when the caller clearly wants to end the call quickly.
+- Never say a confirmation text was sent unless the tool result shows
+  `customerConfirmation` exactly equal to `sent`.
+- Never say an appointment is booked or confirmed. It is a request.
+
+#### Notification idempotency
+
+A `notifications` row is claimed **before** the message is sent, and unique
+indexes allow one notification per request per type. A retried tool call loses
+that race and reports what the first attempt achieved instead of texting
+anybody a second time.
+
+#### What notifications store
+
+Only that a message was attempted and how it went: business, request id, Vapi
+call id, recipient type, channel, notification type, status, provider,
+provider message id, and the provider's error code. **No message text and no
+phone numbers** — those live on the request and customer rows already, and
+duplicating them would spread personal data further for no benefit.
+
 ### Vapi events endpoint (end-of-call reports)
 
 `POST /api/vapi/events` receives Vapi's server events. It uses the **same**
@@ -403,7 +585,11 @@ one, and stores `null` when Vapi does not supply one.
 > security enabled with no policies, so only the server's secret key can read
 > them. Failure logs deliberately record only ids, the step, the database error
 > code, and the business — never a phone number, name, transcript, problem
-> description, or callback reason. Treat a database backup as personal data.
+> description, callback reason, or the text of any SMS. Treat a database backup
+> as personal data.
+>
+> **Never expose `SUPABASE_SECRET_KEY`, `VAPI_TOOL_SECRET`, or
+> `TWILIO_AUTH_TOKEN`.** All three are server-side only.
 >
 > **Never expose `SUPABASE_SECRET_KEY` or `VAPI_TOOL_SECRET`.** Both are
 > server-side only. Neither belongs in a browser, a frontend build, a log line,
@@ -501,6 +687,7 @@ src/
     estimates.ts          # estimate queries
     calls.ts               # call and customer queries
     requests.ts            # appointment + callback request queries
+    notifications.ts        # notification log queries
   scripts/
     check-db.ts           # manual connection check (npm run db:check)
   middleware/
@@ -533,6 +720,10 @@ src/
 
 - Confirmed bookings and calendar integration (requests are captured, but
   nothing checks availability or confirms anything)
+- Marketing or bulk SMS — messages are strictly transactional
+- Inbound SMS and STOP handling (Twilio handles STOP at the account level, but
+  this system will not know a caller opted out)
+- Retrying a failed SMS (failures are recorded, nothing retries them)
 - SMS (Twilio)
 - Calendar booking (Google Calendar)
 - Authentication on `POST /api/estimate` (the Vapi tool endpoint *is* protected)

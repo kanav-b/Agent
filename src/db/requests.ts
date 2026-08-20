@@ -123,6 +123,32 @@ export async function linkRequestsToCustomer(
   }
 }
 
+/**
+ * Turns a consent flag into the evidence stored alongside the request.
+ *
+ * The timestamp, method, and scope are decided here, never taken from the
+ * tool: a caller-supplied "I consented at 9am" would be worthless as proof.
+ * The scope records that this covers one confirmation for this one request —
+ * not marketing, not future requests, not anything else.
+ */
+function consentEvidence(consented: boolean): Record<string, unknown> {
+  if (!consented) {
+    return {
+      customer_sms_consent: false,
+      customer_sms_consent_at: null,
+      customer_sms_consent_method: null,
+      customer_sms_consent_scope: null
+    };
+  }
+
+  return {
+    customer_sms_consent: true,
+    customer_sms_consent_at: new Date().toISOString(),
+    customer_sms_consent_method: "voice",
+    customer_sms_consent_scope: "request_confirmation"
+  };
+}
+
 export interface RequestContext {
   vapiToolCallId?: string;
   vapiCallId?: string;
@@ -205,7 +231,8 @@ export async function createAppointmentRequest(
       service: input.service ?? null,
       problem_description: input.problemDescription ?? null,
       preferred_date: input.preferredDate ?? null,
-      preferred_time_text: input.preferredTimeText ?? null
+      preferred_time_text: input.preferredTimeText ?? null,
+      ...consentEvidence(input.customerSmsConsent)
       // status defaults to 'pending'. Nothing here can confirm a booking.
     })
     .select("id")
@@ -249,7 +276,8 @@ export async function createCallbackRequest(
       vapi_call_id: context.vapiCallId ?? null,
       vapi_tool_call_id: context.vapiToolCallId ?? null,
       reason: input.reason ?? null,
-      preferred_callback_at: input.preferredCallbackAt ?? null
+      preferred_callback_at: input.preferredCallbackAt ?? null,
+      ...consentEvidence(input.customerSmsConsent)
     })
     .select("id")
     .single();

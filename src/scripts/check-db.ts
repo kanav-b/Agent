@@ -64,6 +64,7 @@ async function main(): Promise<void> {
 
   await checkCalls();
   await checkRequests();
+  await checkNotifications();
 }
 
 /**
@@ -113,9 +114,9 @@ async function checkCalls(): Promise<void> {
 /**
  * Reports on appointment and callback requests.
  *
- * Only ids, statuses, and timestamps are selected. Phone numbers, names,
- * problem descriptions, and callback reasons are never read, so they cannot
- * reach the terminal.
+ * Only ids, statuses, the consent flag, and timestamps are selected. Phone
+ * numbers, names, problem descriptions, callback reasons, and the consent
+ * timestamp are never read, so they cannot reach the terminal.
  */
 async function checkRequests(): Promise<void> {
   const supabase = getSupabase();
@@ -136,7 +137,7 @@ async function checkRequests(): Promise<void> {
 
     const { data: recent, error: recentError } = await supabase
       .from(table)
-      .select("id, status, created_at")
+      .select("id, status, customer_sms_consent, created_at")
       .order("created_at", { ascending: false })
       .limit(5);
 
@@ -145,10 +146,49 @@ async function checkRequests(): Promise<void> {
     }
 
     for (const row of recent ?? []) {
+      // Whether consent was given, never when or in what words.
+      const consent = row.customer_sms_consent ? "sms:yes" : "sms:no ";
       console.log(
-        `      ${row.created_at}  ${String(row.status).padEnd(10)}  ${row.id}`
+        `      ${row.created_at}  ${String(row.status).padEnd(10)}  ${consent}  ${row.id}`
       );
     }
+  }
+}
+
+/**
+ * Reports on the notification log.
+ *
+ * The table holds no message text and no phone numbers by design, so there is
+ * nothing sensitive to print. Provider credentials are never read.
+ */
+async function checkNotifications(): Promise<void> {
+  const supabase = getSupabase();
+
+  const { count, error: countError } = await supabase
+    .from("notifications")
+    .select("id", { count: "exact", head: true });
+
+  if (countError) {
+    throw new Error(`Could not query notifications: ${countError.message}`);
+  }
+
+  console.log(`OK    notifications table reachable, ${count ?? 0} row(s) total.`);
+
+  const { data: recent, error: recentError } = await supabase
+    .from("notifications")
+    .select("id, notification_type, recipient_type, status, created_at")
+    .order("created_at", { ascending: false })
+    .limit(5);
+
+  if (recentError) {
+    throw new Error(`Could not query recent notifications: ${recentError.message}`);
+  }
+
+  for (const row of recent ?? []) {
+    console.log(
+      `      ${row.created_at}  ${String(row.notification_type).padEnd(30)}  ` +
+        `${String(row.recipient_type).padEnd(9)}  ${String(row.status).padEnd(7)}  ${row.id}`
+    );
   }
 }
 

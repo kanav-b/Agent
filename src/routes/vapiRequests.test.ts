@@ -11,12 +11,29 @@ vi.mock("../db/requests.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../notifications/sms.js", () => ({
+  sendShopAppointmentNotification: vi.fn(),
+  sendShopCallbackNotification: vi.fn(),
+  sendCustomerAppointmentConfirmation: vi.fn(),
+  sendCustomerCallbackConfirmation: vi.fn()
+}));
+
 import { createApp } from "../app.js";
+import {
+  sendCustomerAppointmentConfirmation,
+  sendCustomerCallbackConfirmation,
+  sendShopAppointmentNotification,
+  sendShopCallbackNotification
+} from "../notifications/sms.js";
 import { createAppointmentRequest, createCallbackRequest } from "../db/requests.js";
 import { VAPI_SECRET_HEADER } from "../middleware/vapiAuth.js";
 
 const mockAppointment = vi.mocked(createAppointmentRequest);
 const mockCallback = vi.mocked(createCallbackRequest);
+const mockShopAppointmentSms = vi.mocked(sendShopAppointmentNotification);
+const mockShopCallbackSms = vi.mocked(sendShopCallbackNotification);
+const mockCustomerAppointmentSms = vi.mocked(sendCustomerAppointmentConfirmation);
+const mockCustomerCallbackSms = vi.mocked(sendCustomerCallbackConfirmation);
 
 const TEST_SECRET = "test-vapi-secret-not-real";
 process.env.SUPABASE_URL = "https://test.invalid";
@@ -69,6 +86,15 @@ beforeEach(() => {
   mockAppointment.mockResolvedValue({ requestId: "appointment-1", reused: false });
   mockCallback.mockReset();
   mockCallback.mockResolvedValue({ requestId: "callback-1", reused: false });
+
+  for (const sms of [mockShopAppointmentSms, mockShopCallbackSms]) {
+    sms.mockReset();
+    sms.mockResolvedValue("sent");
+  }
+  for (const sms of [mockCustomerAppointmentSms, mockCustomerCallbackSms]) {
+    sms.mockReset();
+    sms.mockResolvedValue("not_requested");
+  }
 });
 
 describe("POST /api/vapi/tools/appointment-request", () => {
@@ -377,3 +403,193 @@ describe("request tools — authentication", () => {
     expect(mockCallback).not.toHaveBeenCalled();
   });
 });
+
+describe("notifications from the appointment tool", () => {
+  it("notifies the shop after the request is stored", async () => {
+    await post(APPOINTMENT_ROUTE, envelope("create_appointment_request", appointmentArgs));
+
+    expect(mockShopAppointmentSms).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports the shop notification status in the result", async () => {
+    const res = await post(APPOINTMENT_ROUTE, envelope("create_appointment_request", appointmentArgs));
+
+    expect(parsedResult(res).shopNotification).toBe("sent");
+  });
+
+  it("passes the stored request id and the vehicle to the notifier", async () => {
+    await post(
+      APPOINTMENT_ROUTE,
+      envelope("create_appointment_request", appointmentArgs, { vapiCallId: "vapi-call-9" })
+    );
+
+    const [ref, summary] = mockShopAppointmentSms.mock.calls[0];
+    expect(ref).toEqual({
+      businessId: "demo-shop",
+      vapiCallId: "vapi-call-9",
+      requestId: "appointment-1"
+    });
+    expect(summary).toMatchObject({ vehicleMake: "Toyota", service: "front_brake_pads" });
+  });
+
+  it("defaults customerSmsConsent to false when the tool omits it", async () => {
+    await post(APPOINTMENT_ROUTE, envelope("create_appointment_request", appointmentArgs));
+
+    expect(mockCustomerAppointmentSms.mock.calls[0][2]).toBe(false);
+    expect(mockAppointment.mock.calls[0][0].customerSmsConsent).toBe(false);
+  });
+
+  it("passes consent through when the caller agreed", async () => {
+    await post(
+      APPOINTMENT_ROUTE,
+      envelope("create_appointment_request", { ...appointmentArgs, customerSmsConsent: true })
+    );
+
+    expect(mockCustomerAppointmentSms.mock.calls[0][2]).toBe(true);
+  });
+
+  it("reports not_requested when the caller did not ask for a text", async () => {
+    const res = await post(APPOINTMENT_ROUTE, envelope("create_appointment_request", appointmentArgs));
+
+    expect(parsedResult(res).customerConfirmation).toBe("not_requested");
+  });
+
+  it("reports sent when the caller confirmation went out", async () => {
+    mockCustomerAppointmentSms.mockResolvedValue("sent");
+
+    const res = await post(
+      APPOINTMENT_ROUTE,
+      envelope("create_appointment_request", { ...appointmentArgs, customerSmsConsent: true })
+    );
+
+    expect(parsedResult(res).customerConfirmation).toBe("sent");
+  });
+
+  it("still records the request when the shop SMS fails", async () => {
+    mockShopAppointmentSms.mockResolvedValue("failed");
+
+    const res = await post(APPOINTMENT_ROUTE, envelope("create_appointment_request", appointmentArgs));
+    const parsed = parsedResult(res);
+
+    expect(res.status).toBe(200);
+    expect(parsed.requestId).toBe("appointment-1");
+    expect(parsed.status).toBe("pending");
+    expect(parsed.shopNotification).toBe("failed");
+    expect(res.body.results[0].error).toBeUndefined();
+  });
+
+  it("never claims a text was sent when delivery failed", async () => {
+    mockCustomerAppointmentSms.mockResolvedValue("failed");
+
+    const res = await post(
+      APPOINTMENT_ROUTE,
+      envelope("create_appointment_request", { ...appointmentArgs, customerSmsConsent: true })
+    );
+
+    expect(parsedResult(res).customerConfirmation).toBe("failed");
+    expect(parsedResult(res).customerConfirmation).not.toBe("sent");
+  });
+
+  it("reports no_phone when consent was given without a number", async () => {
+    mockCustomerAppointmentSms.mockResolvedValue("no_phone");
+
+    const res = await post(
+      APPOINTMENT_ROUTE,
+      envelope("create_appointment_request", {
+        service: "front_brake_pads",
+        preferredDate: "2026-08-25",
+        customerSmsConsent: true
+      })
+    );
+
+    expect(parsedResult(res).customerConfirmation).toBe("no_phone");
+  });
+
+  it("sends no SMS when persistence failed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mockAppointment.mockRejectedValue(new Error("connection refused"));
+
+    await post(APPOINTMENT_ROUTE, envelope("create_appointment_request", appointmentArgs));
+
+    expect(mockShopAppointmentSms).not.toHaveBeenCalled();
+    expect(mockCustomerAppointmentSms).not.toHaveBeenCalled();
+  });
+
+  it("sends no SMS when validation failed", async () => {
+    await post(APPOINTMENT_ROUTE, envelope("create_appointment_request", { service: "x" }));
+
+    expect(mockShopAppointmentSms).not.toHaveBeenCalled();
+  });
+});
+
+describe("notifications from the callback tool", () => {
+  it("notifies the shop and reports the status", async () => {
+    const res = await post(CALLBACK_ROUTE, envelope("create_callback_request", callbackArgs));
+
+    expect(mockShopCallbackSms).toHaveBeenCalledTimes(1);
+    expect(parsedResult(res).shopNotification).toBe("sent");
+  });
+
+  it("sends a caller confirmation only with consent", async () => {
+    mockCustomerCallbackSms.mockResolvedValue("sent");
+
+    const res = await post(
+      CALLBACK_ROUTE,
+      envelope("create_callback_request", { ...callbackArgs, customerSmsConsent: true })
+    );
+
+    expect(mockCustomerCallbackSms.mock.calls[0][2]).toBe(true);
+    expect(parsedResult(res).customerConfirmation).toBe("sent");
+  });
+
+  it("still records the request when the shop SMS fails", async () => {
+    mockShopCallbackSms.mockResolvedValue("failed");
+
+    const res = await post(CALLBACK_ROUTE, envelope("create_callback_request", callbackArgs));
+
+    expect(parsedResult(res).requestId).toBe("callback-1");
+    expect(parsedResult(res).status).toBe("pending");
+    expect(res.body.results[0].error).toBeUndefined();
+  });
+
+  it("reports not_configured when Twilio is not set up", async () => {
+    mockShopCallbackSms.mockResolvedValue("not_configured");
+
+    const res = await post(CALLBACK_ROUTE, envelope("create_callback_request", callbackArgs));
+
+    expect(parsedResult(res).shopNotification).toBe("not_configured");
+    expect(parsedResult(res).requestId).toBe("callback-1");
+  });
+
+  it("sends no SMS when persistence failed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mockCallback.mockRejectedValue(new Error("connection refused"));
+
+    await post(CALLBACK_ROUTE, envelope("create_callback_request", callbackArgs));
+
+    expect(mockShopCallbackSms).not.toHaveBeenCalled();
+    expect(mockCustomerCallbackSms).not.toHaveBeenCalled();
+  });
+});
+
+describe("unauthorised requests send nothing", () => {
+  it("sends no SMS for an unauthenticated appointment request", async () => {
+    await request(app)
+      .post(APPOINTMENT_ROUTE)
+      .send(envelope("create_appointment_request", appointmentArgs));
+
+    expect(mockShopAppointmentSms).not.toHaveBeenCalled();
+    expect(mockCustomerAppointmentSms).not.toHaveBeenCalled();
+  });
+
+  it("sends no SMS for an unauthenticated callback request", async () => {
+    await request(app)
+      .post(CALLBACK_ROUTE)
+      .set(VAPI_SECRET_HEADER, "wrong")
+      .send(envelope("create_callback_request", callbackArgs));
+
+    expect(mockShopCallbackSms).not.toHaveBeenCalled();
+    expect(mockCustomerCallbackSms).not.toHaveBeenCalled();
+  });
+});
+

@@ -34,6 +34,13 @@ export const appointmentRequestSchema = z
   .object({
     businessId: z.string().min(1).default(DEFAULT_BUSINESS_ID),
     customer: customerSchema.optional(),
+    /**
+     * Whether the caller explicitly agreed, on this call, to a confirmation
+     * text. A phone number on its own is never consent, and this applies only
+     * to this one request — it is not standing permission to text them.
+     */
+    customerSmsConsent: z.boolean().default(false),
+
     vehicle: vehicleSchema.optional(),
     service: z.string().min(1).optional(),
     problemDescription: z.string().min(1).optional(),
@@ -65,6 +72,13 @@ export type AppointmentRequestInput = z.infer<typeof appointmentRequestSchema>;
 export const callbackRequestSchema = z.object({
   businessId: z.string().min(1).default(DEFAULT_BUSINESS_ID),
   customer: customerSchema.optional(),
+  /**
+   * Whether the caller explicitly agreed, on this call, to a confirmation
+   * text. A phone number on its own is never consent, and this applies only
+   * to this one request — it is not standing permission to text them.
+   */
+  customerSmsConsent: z.boolean().default(false),
+
   // Recommended, not required: a caller may just ask to be rung back.
   reason: z.string().min(1).optional(),
   // Must carry a timezone, so the stored instant is unambiguous.

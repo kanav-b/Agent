@@ -68,6 +68,7 @@ function fakeClient() {
 
 const appointment = {
   businessId: "demo-shop",
+  customerSmsConsent: false,
   customer: { name: "Dana", phone: "+14085551234" },
   vehicle: { year: 2019, make: "Toyota", model: "Camry" },
   service: "front_brake_pads",
@@ -78,6 +79,7 @@ const appointment = {
 
 const callback = {
   businessId: "demo-shop",
+  customerSmsConsent: false,
   customer: { name: "Dana", phone: "+14085551234" },
   reason: "Wants to discuss the quote",
   preferredCallbackAt: "2026-08-20T14:00:00Z"
@@ -135,7 +137,11 @@ describe("createAppointmentRequest", () => {
       service: "front_brake_pads",
       problem_description: null,
       preferred_date: "2026-08-25",
-      preferred_time_text: "morning"
+      preferred_time_text: "morning",
+      customer_sms_consent: false,
+      customer_sms_consent_at: null,
+      customer_sms_consent_method: null,
+      customer_sms_consent_scope: null
     });
   });
 
@@ -238,7 +244,11 @@ describe("createCallbackRequest", () => {
       vapi_call_id: "vapi-call-1",
       vapi_tool_call_id: "tc-2",
       reason: "Wants to discuss the quote",
-      preferred_callback_at: "2026-08-20T14:00:00Z"
+      preferred_callback_at: "2026-08-20T14:00:00Z",
+      customer_sms_consent: false,
+      customer_sms_consent_at: null,
+      customer_sms_consent_method: null,
+      customer_sms_consent_scope: null
     });
   });
 
@@ -250,7 +260,7 @@ describe("createCallbackRequest", () => {
 
   it("allows a request with no phone number", async () => {
     const result = await createCallbackRequest(
-      { businessId: "demo-shop", reason: "Wants a call" },
+      { businessId: "demo-shop", customerSmsConsent: false, reason: "Wants a call" },
       { vapiToolCallId: "tc-2" }
     );
 
@@ -331,3 +341,142 @@ describe("PII-safe failure logging", () => {
     expect(logged[0]).not.toContain("front_brake_pads");
   });
 });
+
+describe("SMS consent evidence", () => {
+  const consentColumns = (table: string) => {
+    const payload = calls.find((c) => c.table === table && c.op === "insert")?.payload ?? {};
+    return {
+      consent: payload.customer_sms_consent,
+      at: payload.customer_sms_consent_at,
+      method: payload.customer_sms_consent_method,
+      scope: payload.customer_sms_consent_scope
+    };
+  };
+
+  describe("appointment requests", () => {
+    it("stores consent as true when the caller agreed", async () => {
+      await createAppointmentRequest({ ...appointment, customerSmsConsent: true }, {});
+
+      expect(consentColumns("appointment_requests").consent).toBe(true);
+    });
+
+    it("stores a server timestamp, not one from the caller", async () => {
+      const before = Date.now();
+      await createAppointmentRequest({ ...appointment, customerSmsConsent: true }, {});
+      const after = Date.now();
+
+      const at = consentColumns("appointment_requests").at as string;
+      expect(typeof at).toBe("string");
+      const recorded = new Date(at).getTime();
+      expect(recorded).toBeGreaterThanOrEqual(before);
+      expect(recorded).toBeLessThanOrEqual(after);
+    });
+
+    it('stores method "voice"', async () => {
+      await createAppointmentRequest({ ...appointment, customerSmsConsent: true }, {});
+
+      expect(consentColumns("appointment_requests").method).toBe("voice");
+    });
+
+    it('stores scope "request_confirmation"', async () => {
+      await createAppointmentRequest({ ...appointment, customerSmsConsent: true }, {});
+
+      expect(consentColumns("appointment_requests").scope).toBe("request_confirmation");
+    });
+
+    it("stores false when consent was not given", async () => {
+      await createAppointmentRequest({ ...appointment, customerSmsConsent: false }, {});
+
+      expect(consentColumns("appointment_requests").consent).toBe(false);
+    });
+
+    it("leaves the audit columns null when consent was not given", async () => {
+      await createAppointmentRequest({ ...appointment, customerSmsConsent: false }, {});
+
+      const { at, method, scope } = consentColumns("appointment_requests");
+      expect(at).toBeNull();
+      expect(method).toBeNull();
+      expect(scope).toBeNull();
+    });
+
+    it("ignores a timestamp or method supplied by the caller", async () => {
+      await createAppointmentRequest(
+        {
+          ...appointment,
+          customerSmsConsent: true,
+          // A tool could try to dictate its own evidence. It must not win.
+          customer_sms_consent_at: "1999-01-01T00:00:00Z",
+          customerSmsConsentAt: "1999-01-01T00:00:00Z",
+          customerSmsConsentMethod: "manual",
+          customerSmsConsentScope: "marketing"
+        } as never,
+        {}
+      );
+
+      const { at, method, scope } = consentColumns("appointment_requests");
+      expect(at).not.toBe("1999-01-01T00:00:00Z");
+      expect(new Date(at as string).getFullYear()).toBeGreaterThan(2020);
+      expect(method).toBe("voice");
+      expect(scope).toBe("request_confirmation");
+    });
+  });
+
+  describe("callback requests", () => {
+    it("stores the full evidence when the caller agreed", async () => {
+      await createCallbackRequest({ ...callback, customerSmsConsent: true }, {});
+
+      const { consent, at, method, scope } = consentColumns("callback_requests");
+      expect(consent).toBe(true);
+      expect(typeof at).toBe("string");
+      expect(method).toBe("voice");
+      expect(scope).toBe("request_confirmation");
+    });
+
+    it("stores false and null audit columns without consent", async () => {
+      await createCallbackRequest({ ...callback, customerSmsConsent: false }, {});
+
+      const { consent, at, method, scope } = consentColumns("callback_requests");
+      expect(consent).toBe(false);
+      expect(at).toBeNull();
+      expect(method).toBeNull();
+      expect(scope).toBeNull();
+    });
+
+    it("ignores caller-supplied evidence", async () => {
+      await createCallbackRequest(
+        { ...callback, customerSmsConsent: true, customerSmsConsentMethod: "manual" } as never,
+        {}
+      );
+
+      expect(consentColumns("callback_requests").method).toBe("voice");
+    });
+  });
+
+  describe("retries", () => {
+    it("returns the original appointment without rewriting its consent", async () => {
+      replies["appointment_requests.select"] = { data: { id: "original-request" } };
+
+      const result = await createAppointmentRequest(
+        { ...appointment, customerSmsConsent: true },
+        { vapiToolCallId: "tc-1" }
+      );
+
+      expect(result).toEqual({ requestId: "original-request", reused: true });
+      // No insert and no update, so the stored evidence is untouched.
+      expect(calls.some((c) => c.table === "appointment_requests" && c.op !== "select")).toBe(false);
+    });
+
+    it("returns the original callback without rewriting its consent", async () => {
+      replies["callback_requests.select"] = { data: { id: "original-callback" } };
+
+      const result = await createCallbackRequest(
+        { ...callback, customerSmsConsent: true },
+        { vapiToolCallId: "tc-2" }
+      );
+
+      expect(result.reused).toBe(true);
+      expect(calls.some((c) => c.table === "callback_requests" && c.op !== "select")).toBe(false);
+    });
+  });
+});
+
