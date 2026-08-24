@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { estimateRequestSchema } from "../schemas/estimate.js";
-import { getEstimate, UnsupportedServiceError, type Estimate } from "../pricing/estimate.js";
-import { SUPPORTED_SERVICES } from "../pricing/catalog.js";
+import { buildEstimate, type Estimate } from "../pricing/estimate.js";
 import { persistEstimate } from "../db/estimates.js";
+import {
+  listAvailableServiceKeys,
+  resolveBusiness,
+  resolveServicePricing
+} from "../business/config.js";
 
 /** What the API sends back: the price estimate plus an ID for tracking it. */
 export type EstimateResponse = Estimate & { estimateId: string };
@@ -22,23 +26,37 @@ estimateRouter.post("/estimate", async (req, res) => {
 
   const { businessId, service, vehicle } = parsed.data;
 
-  // Step 1: work out the price. Nothing is stored yet, so an unsupported
-  // service leaves the database untouched.
   let estimate: Estimate;
+
   try {
-    estimate = getEstimate(service, vehicle);
-  } catch (err) {
-    if (err instanceof UnsupportedServiceError) {
+    // Step 1: which shop is this, and is it open for business at all? An
+    // unknown or switched-off shop stops here, before anything is priced.
+    const business = await resolveBusiness(businessId);
+
+    if (!business.ok) {
+      return res.status(400).json({ error: "This shop is not available." });
+    }
+
+    // Step 2: what does *this* shop charge? Prices come from its own
+    // configuration; there are none in this file.
+    const pricing = await resolveServicePricing(businessId, service);
+
+    if (!pricing.ok) {
       return res.status(400).json({
         error: `Service "${service}" is not supported.`,
-        supportedServices: SUPPORTED_SERVICES
+        supportedServices: await listAvailableServiceKeys(businessId)
       });
     }
-    throw err;
+
+    // Step 3: the calculation itself, which is pure.
+    estimate = buildEstimate(vehicle, pricing.pricing);
+  } catch {
+    // A configuration lookup failed. Say nothing about the database.
+    return res.status(500).json({ error: "Could not price the estimate. Please try again." });
   }
 
-  // Step 2: store it. The id is generated here, at the response boundary, so
-  // getEstimate stays deterministic.
+  // Step 4: store it. The id is generated here, at the response boundary, so
+  // the pricing calculation stays deterministic.
   const estimateId = randomUUID();
 
   try {

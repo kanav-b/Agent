@@ -3,7 +3,7 @@
 Backend API for an AI receptionist that gives customers a preliminary price
 estimate for common auto services.
 
-Prices come from a hardcoded catalog, estimates are stored in Supabase, and a
+Prices come from each shop's own configuration, estimates are stored in Supabase, and a
 Vapi voice assistant can request one during a call. The assistant can also
 record appointment and callback **requests** — which the shop still has to act
 on, since nothing here confirms a booking — and the shop is texted when one
@@ -45,7 +45,7 @@ Then open `.env` and fill in the values below:
 | `TWILIO_ACCOUNT_SID` | Twilio Console → Account Info |
 | `TWILIO_AUTH_TOKEN` | Twilio Console → Account Info (a credential) |
 | `TWILIO_FROM_NUMBER` | An SMS-capable Twilio number, E.164 (`+14155550123`) |
-| `SHOP_NOTIFICATION_NUMBER` | Where shop alerts go, E.164 |
+| `SHOP_NOTIFICATION_NUMBER` | Fallback for shop alerts, E.164 — optional |
 | `SMS_ENABLED` | `true` or `false` — **defaults to `false`** |
 
 `PORT` is optional and defaults to `3000`.
@@ -98,8 +98,9 @@ keeps working and requests keep being recorded.
 2. Buy or use an **SMS-capable** phone number — that becomes
    `TWILIO_FROM_NUMBER`.
 3. Copy the Account SID and Auth Token from the console.
-4. Set `SHOP_NOTIFICATION_NUMBER` to the shop's mobile — the number that should
-   receive alerts. It is not a caller's number.
+4. Set `SHOP_NOTIFICATION_NUMBER` to the shop's mobile — the fallback number
+   for alerts. It is not a caller's number, and a shop's own
+   `notification_phone` takes precedence over it.
 5. On a Twilio trial account you can only text **verified** numbers, so verify
    the shop number before testing.
 
@@ -124,11 +125,13 @@ supabase/migrations/20260819000100_estimates_vapi_call_id.sql
 supabase/migrations/20260819000200_requests.sql
 supabase/migrations/20260819000300_notifications.sql
 supabase/migrations/20260819000400_sms_consent.sql
+supabase/migrations/20260819000500_business_config.sql
 ```
 
 These add the `calls` table, let an estimate remember which call produced it,
 add `appointment_requests` and `callback_requests`, add `notifications`, and
-add the SMS consent columns. All are safe to run more than once.
+add the SMS consent columns, and add the per-shop configuration tables. All
+are safe to run more than once.
 
 ## 4. Check the database connection
 
@@ -139,11 +142,14 @@ npm run db:check
 This confirms the credentials work, that `demo-shop` exists, and that the
 `estimates`, `calls`, `appointment_requests`, `callback_requests`, and
 `notifications` tables are reachable, with counts and the five most recent rows
-of each. It needs Supabase but **not** Twilio.
+of each. It also prints the demo shop's configuration: whether it is active,
+its timezone, how many hours rows it has, and its services with prices. It
+needs Supabase but **not** Twilio.
 
 It prints no secrets and **no personal information** — calls are listed by
 Vapi call id, outcome, and follow-up flag, and requests by id and status only.
-Notifications are listed by type, recipient, and status. Never a phone number,
+Notifications are listed by type, recipient, and status, and a shop's
+notification phone is reported only as configured or not. Never a phone number,
 name, transcript, problem description, reason, or message text. Nothing runs it
 automatically.
 
@@ -196,8 +202,8 @@ themselves never change for the same service and vehicle.
 ### Optional: businessId
 
 The shop can be named explicitly. It is optional and defaults to
-`"demo-shop"`, and it does **not** affect pricing yet — it is here so the API
-can support multiple shops later.
+`"demo-shop"`. It now decides which prices apply — see
+[Business configuration](#business-configuration).
 
 ```bash
 curl -X POST http://localhost:3000/api/estimate \
@@ -618,15 +624,148 @@ Returns `{"status":"ok"}` with HTTP 200.
 If you send a `service` that isn't in this list, you'll get a `400` response
 listing the supported services.
 
+## Business configuration
+
+Everything that varies between shops lives in the database rather than in the
+code: prices, opening hours, timezone, and where alerts are sent. The same
+backend can therefore serve more than one shop without a code change.
+
+This is **not** multi-tenant SaaS. There is no onboarding, no tenant login, and
+no automatic routing. A second shop is added by inserting rows.
+
+### Where configuration lives
+
+| Table | Holds |
+| --- | --- |
+| `businesses` | Name, phone, timezone, address, after-hours message, `is_active`, `notification_phone` |
+| `business_hours` | One row per weekday: open/close times, or closed |
+| `business_services` | What the shop offers and charges, per service key |
+
+`demo-shop` remains the default when a request omits `businessId`, so existing
+callers keep working unchanged.
+
+### Pricing comes from `business_services`
+
+There are no prices in the application code any more. A request resolves the
+shop, then that shop's row for the requested service, and prices from it.
+
+The migration seeds `demo-shop` with **exactly** the prices the old hardcoded
+catalog used, so nothing changed for anybody:
+
+| Service key | Price |
+| --- | --- |
+| `synthetic_oil_change` | $80–$120 |
+| `front_brake_pads` | $300–$450 |
+| `battery_replacement` | $190–$340 |
+| `diagnostic` | $149–$149 |
+| `tire_rotation` | $40–$60 |
+
+**A service is unavailable** when the shop has no row for that key, or has one
+with `is_active = false`. Both give the caller the same answer — we cannot
+quote for that — with the shop's actual services listed instead.
+
+**An inactive business** (`is_active = false`) is refused before anything is
+priced or stored. So is an unknown one. A `businessId` is no longer just a
+string that fails later.
+
+### Deterministic pricing is preserved
+
+The split that matters:
+
+```
+resolveServicePricing(businessId, service)   ← database
+        ↓
+buildEstimate(vehicle, pricing)              ← pure, no I/O
+```
+
+`buildEstimate()` does no lookups, reads no clock, and touches no database.
+Give it the same pricing and vehicle and it returns the same estimate every
+time. `src/pricing/` imports nothing from `src/db/` — there is a test that
+reads the source files and fails if it ever does.
+
+`getEstimate()` still exists and still prices from the built-in catalog. It is
+the reference catalog a new shop is seeded from, and the simplest way to
+exercise the calculation; live requests do not use it.
+
+### Business hours
+
+Times are wall-clock times in the shop's own `timezone`, handled with the
+platform's `Intl` support — no dependency, and daylight saving is handled for
+you.
+
+- `open_time` is **inclusive**: at exactly 08:00 the shop is open.
+- `close_time` is **exclusive**: at exactly 17:00 the shop is closed. Better
+  than promising someone a slot at the moment the doors lock.
+- A day with no row is treated as **closed**. Silence is not an invitation.
+
+`isBusinessOpenAt(hours, timestamp, timezone)` is pure and takes the hours it
+needs, so every awkward case is testable without a database or a fake clock.
+
+**Not supported in this phase, deliberately:** overnight shifts (a close time
+earlier than the open time), split shifts, and holiday overrides. One row per
+day cannot say which day a 02:00 closing belongs to, and guessing would produce
+a shop that claims to be open at 3am — such a row is treated as closed.
+
+### Where shop alerts go
+
+Most specific wins:
+
+1. `businesses.notification_phone` for that shop
+2. the global `SHOP_NOTIFICATION_NUMBER` fallback
+3. neither → `not_configured`, and nothing is attempted
+
+`SHOP_NOTIFICATION_NUMBER` is therefore now optional rather than a required
+credential. Caller confirmations are unaffected — they go to the caller.
+
+### Adding a second shop
+
+By hand, for now. Nothing in the tests depends on this:
+
+```sql
+insert into businesses (id, name, timezone, notification_phone)
+values ('second-shop', 'Second Auto Repair', 'America/New_York', null);
+
+insert into business_hours (business_id, day_of_week, open_time, close_time, is_closed)
+values
+  ('second-shop', 0, null, null, true),
+  ('second-shop', 1, '09:00', '18:00', false),
+  ('second-shop', 2, '09:00', '18:00', false),
+  ('second-shop', 3, '09:00', '18:00', false),
+  ('second-shop', 4, '09:00', '18:00', false),
+  ('second-shop', 5, '09:00', '18:00', false),
+  ('second-shop', 6, '09:00', '13:00', false);
+
+insert into business_services
+  (business_id, service_key, display_name, low_price, high_price, disclaimer)
+values
+  ('second-shop', 'front_brake_pads', 'Front Brake Pads', 320, 480,
+   'Final pricing is subject to vehicle inspection.');
+```
+
+Then send `"businessId": "second-shop"` with the request.
+
+### Deferred on purpose
+
+- **Dynamic Vapi tool schemas.** The assistant's `calculate_estimate` tool
+  still carries a fixed service enum for demo testing. The backend stays the
+  authority: a service the shop does not offer is refused regardless of what
+  the tool schema allows. Generating tool schemas per shop is a later phase.
+- **Dynamic system prompts.** `BusinessConfig` (name, phone, timezone,
+  after-hours message, hours) is assembled and ready for it, and is
+  deliberately free of any Vapi-specific types — but nothing rewrites an
+  assistant's prompt yet.
+- Holiday hours, multi-location, and tenant authentication.
+
 ## Pricing vs. persistence
 
 These are two separate steps, and keeping them separate is deliberate.
 
-**Pricing is deterministic.** `getEstimate()` in `src/pricing/estimate.ts` looks
-a service up in the hardcoded catalog and returns a price range. It has no
-database access, no clock, and no randomness: the same service and vehicle
-always produce the same numbers, which makes it easy to test and impossible for
-an outage to change a price.
+**Pricing is deterministic.** `buildEstimate()` in `src/pricing/estimate.ts`
+turns already-resolved pricing into an estimate. It has no database access, no
+clock, and no randomness: the same pricing and vehicle always produce the same
+numbers, which makes it easy to test and impossible for an outage to change a
+price. Which prices apply is settled beforehand, from the shop's own
+configuration.
 
 **Persistence is a side effect that happens afterwards.** Once the price is
 known, the route generates an `estimateId` and asks `src/db/estimates.ts` to

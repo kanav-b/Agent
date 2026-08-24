@@ -2,9 +2,13 @@ import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { vapiToolCallsSchema, normalizeToolCall, type VapiToolCall } from "../schemas/vapi.js";
 import { estimateRequestSchema } from "../schemas/estimate.js";
-import { getEstimate, UnsupportedServiceError, type Estimate } from "../pricing/estimate.js";
-import { SUPPORTED_SERVICES } from "../pricing/catalog.js";
+import { buildEstimate, type Estimate } from "../pricing/estimate.js";
 import { persistEstimate } from "../db/estimates.js";
+import {
+  listAvailableServiceKeys,
+  resolveBusiness,
+  resolveServicePricing
+} from "../business/config.js";
 
 /** The only tool this server answers today. */
 const CALCULATE_ESTIMATE = "calculate_estimate";
@@ -46,20 +50,36 @@ async function runToolCall(rawToolCall: VapiToolCall, vapiCallId?: string): Prom
 
   const { businessId, service, vehicle } = parsed.data;
 
-  // Step 1: price it. Nothing is stored yet, so an unsupported service leaves
-  // the database untouched.
+  // Step 1: price it, using this shop's own configuration. Nothing is stored
+  // yet, so an unknown shop or service leaves the database untouched.
   let estimate: Estimate;
   try {
-    // Same deterministic pricing function POST /api/estimate uses.
-    estimate = getEstimate(service, vehicle);
-  } catch (err) {
-    if (err instanceof UnsupportedServiceError) {
+    const business = await resolveBusiness(businessId);
+
+    if (!business.ok) {
       return {
         toolCallId: toolCall.id,
-        error: `Service "${service}" is not supported. Supported services are: ${SUPPORTED_SERVICES.join(", ")}.`
+        error: "This shop is not available right now, so I cannot quote a price."
       };
     }
-    throw err;
+
+    const pricing = await resolveServicePricing(businessId, service);
+
+    if (!pricing.ok) {
+      const available = await listAvailableServiceKeys(businessId);
+      return {
+        toolCallId: toolCall.id,
+        error: `Service "${service}" is not supported. Supported services are: ${available.join(", ")}.`
+      };
+    }
+
+    // The same deterministic calculation POST /api/estimate uses.
+    estimate = buildEstimate(vehicle, pricing.pricing);
+  } catch {
+    return {
+      toolCallId: toolCall.id,
+      error: "Could not look up pricing right now. Please try again in a moment."
+    };
   }
 
   // Step 2: store it. estimateId is generated here, at the response boundary,

@@ -18,6 +18,55 @@ vi.mock("../notifications/sms.js", () => ({
   sendCustomerCallbackConfirmation: vi.fn()
 }));
 
+vi.mock("../business/config.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../business/config.js")>();
+  return {
+    ...actual,
+    resolveBusiness: vi.fn(async (id: string) => ({
+      ok: true as const,
+      business: {
+        id,
+        name: "Demo Auto Repair",
+        phone: null,
+        timezone: "America/Los_Angeles",
+        afterHoursMessage: null,
+        isActive: true,
+        hours: []
+      }
+    })),
+    resolveServicePricing: vi.fn(async (_businessId: string, serviceKey: string) => {
+      const catalog: Record<string, { low: number; high: number }> = {
+        synthetic_oil_change: { low: 80, high: 120 },
+        front_brake_pads: { low: 300, high: 450 },
+        battery_replacement: { low: 190, high: 340 },
+        diagnostic: { low: 149, high: 149 },
+        tire_rotation: { low: 40, high: 60 }
+      };
+      const found = catalog[serviceKey];
+      if (!found) {
+        return { ok: false as const, problem: "unknown_service" as const };
+      }
+      return {
+        ok: true as const,
+        pricing: {
+          serviceKey,
+          low: found.low,
+          high: found.high,
+          currency: "USD",
+          disclaimer: "Final pricing is subject to vehicle inspection."
+        }
+      };
+    }),
+    listAvailableServiceKeys: vi.fn(async () => [
+      "battery_replacement",
+      "diagnostic",
+      "front_brake_pads",
+      "synthetic_oil_change",
+      "tire_rotation"
+    ])
+  };
+});
+
 import { createApp } from "../app.js";
 import {
   sendCustomerAppointmentConfirmation,

@@ -6,6 +6,7 @@ import {
   logRequestFailure
 } from "../db/requests.js";
 import { handleToolCalls, toolError, toolResult } from "./vapiToolCall.js";
+import { resolveBusiness } from "../business/config.js";
 import {
   sendCustomerAppointmentConfirmation,
   sendCustomerCallbackConfirmation,
@@ -56,6 +57,13 @@ vapiRequestsRouter.post("/appointment-request", async (req, res) => {
       }
 
       try {
+      // The shop has to exist and be switched on before anything is stored.
+      const business = await resolveBusiness(parsed.data.businessId);
+
+      if (!business.ok) {
+        return toolError(toolCall.id, "This shop is not available right now.");
+      }
+
         const created = await createAppointmentRequest(parsed.data, {
           vapiToolCallId: toolCall.id,
           vapiCallId: context.vapiCallId
@@ -129,6 +137,13 @@ vapiRequestsRouter.post("/callback-request", async (req, res) => {
       }
 
       try {
+      // The shop has to exist and be switched on before anything is stored.
+      const business = await resolveBusiness(parsed.data.businessId);
+
+      if (!business.ok) {
+        return toolError(toolCall.id, "This shop is not available right now.");
+      }
+
         const created = await createCallbackRequest(parsed.data, {
           vapiToolCallId: toolCall.id,
           vapiCallId: context.vapiCallId

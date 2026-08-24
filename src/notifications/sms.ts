@@ -1,4 +1,5 @@
 import { getSmsConfig, isSmsEnabled, missingSmsConfig } from "../config.js";
+import { getBusiness } from "../db/businesses.js";
 import {
   claimNotification,
   findBusinessName,
@@ -147,7 +148,7 @@ export async function sendShopAppointmentNotification(
   summary: AppointmentSummary
 ): Promise<DeliveryStatus> {
   const target = targetFor("appointment", ref, "appointment_request_shop", "shop");
-  const { number, blocked } = readShopNumber();
+  const { number, blocked } = await readShopNumber(ref.businessId);
 
   if (blocked || !number) {
     return blocked ?? "not_configured";
@@ -161,7 +162,7 @@ export async function sendShopCallbackNotification(
   summary: CallbackSummary
 ): Promise<DeliveryStatus> {
   const target = targetFor("callback", ref, "callback_request_shop", "shop");
-  const { number, blocked } = readShopNumber();
+  const { number, blocked } = await readShopNumber(ref.businessId);
 
   if (blocked || !number) {
     return blocked ?? "not_configured";
@@ -217,12 +218,20 @@ export async function sendCustomerCallbackConfirmation(
 }
 
 /**
- * The shop's number, or nothing when SMS cannot be sent.
+ * Where this shop's alerts go, or the reason none can be sent.
  *
- * Returns a reason rather than throwing, so an unconfigured or switched-off
- * install reports itself accurately instead of failing.
+ * Precedence, most specific first:
+ *
+ *   1. the shop's own `businesses.notification_phone`
+ *   2. the global `SHOP_NOTIFICATION_NUMBER` fallback
+ *
+ * With neither, there is nowhere to send to, which is reported as
+ * "not_configured" rather than as a failure. Returns a reason instead of
+ * throwing so a switched-off install describes itself accurately.
  */
-function readShopNumber(): { number?: string; blocked?: DeliveryStatus } {
+async function readShopNumber(
+  businessId: string
+): Promise<{ number?: string; blocked?: DeliveryStatus }> {
   if (!isSmsEnabled()) {
     return { blocked: "disabled" };
   }
@@ -231,7 +240,10 @@ function readShopNumber(): { number?: string; blocked?: DeliveryStatus } {
     return { blocked: "not_configured" };
   }
 
-  return { number: getSmsConfig().shopNotificationNumber };
+  const business = await getBusiness(businessId).catch(() => null);
+  const number = business?.notificationPhone ?? getSmsConfig().shopNotificationNumber;
+
+  return number ? { number } : { blocked: "not_configured" };
 }
 
 /** The shop's name for caller-facing text, falling back to its id. */

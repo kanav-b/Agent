@@ -20,12 +20,16 @@ export interface Config {
   shopNotificationNumber?: string;
 }
 
-/** The Twilio settings, once they are known to all be present. */
+/** The Twilio settings, once the credentials are known to be present. */
 export interface SmsConfig {
   accountSid: string;
   authToken: string;
   fromNumber: string;
-  shopNotificationNumber: string;
+  /**
+   * The global fallback destination for shop alerts. Optional: a shop can set
+   * its own `notification_phone`, which takes precedence over this.
+   */
+  shopNotificationNumber?: string;
 }
 
 let cached: Config | undefined;
@@ -110,15 +114,20 @@ export function isSmsEnabled(): boolean {
   return getConfig().smsEnabled;
 }
 
-/** The Twilio variables that must all be set before any SMS can be sent. */
+/**
+ * The Twilio credentials needed before any SMS can be sent.
+ *
+ * SHOP_NOTIFICATION_NUMBER is deliberately not here: since shops can each set
+ * their own `notification_phone`, the global number is a fallback rather than
+ * a requirement. Where a message goes is decided per business at send time.
+ */
 export const SMS_ENV_VARS = [
   "TWILIO_ACCOUNT_SID",
   "TWILIO_AUTH_TOKEN",
-  "TWILIO_FROM_NUMBER",
-  "SHOP_NOTIFICATION_NUMBER"
+  "TWILIO_FROM_NUMBER"
 ] as const;
 
-/** Names of any missing Twilio variables. Empty when SMS is ready to use. */
+/** Names of any missing Twilio credentials. Empty when SMS is ready to use. */
 export function missingSmsConfig(): string[] {
   const config = getConfig();
 
@@ -126,7 +135,6 @@ export function missingSmsConfig(): string[] {
   if (!config.twilioAccountSid) missing.push("TWILIO_ACCOUNT_SID");
   if (!config.twilioAuthToken) missing.push("TWILIO_AUTH_TOKEN");
   if (!config.twilioFromNumber) missing.push("TWILIO_FROM_NUMBER");
-  if (!config.shopNotificationNumber) missing.push("SHOP_NOTIFICATION_NUMBER");
 
   return missing;
 }
@@ -151,6 +159,6 @@ export function getSmsConfig(): SmsConfig {
     accountSid: config.twilioAccountSid as string,
     authToken: config.twilioAuthToken as string,
     fromNumber: config.twilioFromNumber as string,
-    shopNotificationNumber: config.shopNotificationNumber as string
+    shopNotificationNumber: config.shopNotificationNumber
   };
 }

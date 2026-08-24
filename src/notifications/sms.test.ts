@@ -5,6 +5,7 @@ vi.mock("./twilioClient.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./twilioClient.js")>();
   return { ...actual, sendSms: vi.fn() };
 });
+vi.mock("../db/businesses.js", () => ({ getBusiness: vi.fn() }));
 vi.mock("../db/notifications.js", () => ({
   claimNotification: vi.fn(),
   findNotificationStatus: vi.fn(),
@@ -24,6 +25,7 @@ process.env.TWILIO_FROM_NUMBER = "+15550000001";
 process.env.SHOP_NOTIFICATION_NUMBER = "+15550000002";
 
 import { sendSms, SmsSendError } from "./twilioClient.js";
+import { getBusiness } from "../db/businesses.js";
 import {
   claimNotification,
   findBusinessName,
@@ -44,6 +46,7 @@ const mockStatus = vi.mocked(findNotificationStatus);
 const mockSent = vi.mocked(markNotificationSent);
 const mockFailed = vi.mocked(markNotificationFailed);
 const mockBusinessName = vi.mocked(findBusinessName);
+const mockGetBusiness = vi.mocked(getBusiness);
 
 const SHOP_NUMBER = "+15550000002";
 const CALLER_NUMBER = "+14085551234";
@@ -79,6 +82,16 @@ beforeEach(() => {
   mockFailed.mockResolvedValue(undefined);
   mockStatus.mockResolvedValue(null);
   mockBusinessName.mockResolvedValue("Demo Auto Repair");
+  // No shop-specific number by default, so the global fallback is used.
+  mockGetBusiness.mockResolvedValue({
+    id: "demo-shop",
+    name: "Demo Auto Repair",
+    phone: null,
+    notificationPhone: null,
+    timezone: "America/Los_Angeles",
+    afterHoursMessage: null,
+    isActive: true
+  });
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -318,3 +331,61 @@ describe("customer confirmation wording", () => {
     expect(sentBody()).toContain("demo-shop");
   });
 });
+
+describe("where a shop alert is sent", () => {
+  const withNotificationPhone = (phone: string | null) => {
+    mockGetBusiness.mockResolvedValue({
+      id: "demo-shop",
+      name: "Demo Auto Repair",
+      phone: null,
+      notificationPhone: phone,
+      timezone: "America/Los_Angeles",
+      afterHoursMessage: null,
+      isActive: true
+    });
+  };
+
+  it("prefers the shop's own notification_phone", async () => {
+    withNotificationPhone("+15559990000");
+
+    await sendShopAppointmentNotification(ref, appointment);
+
+    expect(sentTo()).toBe("+15559990000");
+    expect(sentTo()).not.toBe(SHOP_NUMBER);
+  });
+
+  it("uses the shop's own number for callbacks too", async () => {
+    withNotificationPhone("+15559990000");
+
+    await sendShopCallbackNotification(ref, callback);
+
+    expect(sentTo()).toBe("+15559990000");
+  });
+
+  it("falls back to SHOP_NOTIFICATION_NUMBER when the shop has none", async () => {
+    withNotificationPhone(null);
+
+    await sendShopAppointmentNotification(ref, appointment);
+
+    expect(sentTo()).toBe(SHOP_NUMBER);
+  });
+
+  it("falls back when the business cannot be read at all", async () => {
+    mockGetBusiness.mockRejectedValue(new Error("database down"));
+
+    const status = await sendShopAppointmentNotification(ref, appointment);
+
+    expect(status).toBe("sent");
+    expect(sentTo()).toBe(SHOP_NUMBER);
+  });
+
+  it("does not change where a caller confirmation goes", async () => {
+    withNotificationPhone("+15559990000");
+
+    await sendCustomerAppointmentConfirmation(ref, appointment, true);
+
+    // Caller texts go to the caller, never to a shop number.
+    expect(sentTo()).toBe(CALLER_NUMBER);
+  });
+});
+

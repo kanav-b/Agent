@@ -39,6 +39,8 @@ async function main(): Promise<void> {
 
   console.log(`OK    business found: ${business.id} (${business.name})`);
 
+  await checkBusinessConfig("demo-shop");
+
   const { data: estimates, error: estimatesError } = await supabase
     .from("estimates")
     .select("id, service, low_price, high_price, source, created_at")
@@ -65,6 +67,69 @@ async function main(): Promise<void> {
   await checkCalls();
   await checkRequests();
   await checkNotifications();
+}
+
+/**
+ * Reports on a shop's configuration.
+ *
+ * The notification phone is reported as configured or not, never printed: a
+ * phone number is personal data even when it belongs to the shop.
+ */
+async function checkBusinessConfig(businessId: string): Promise<void> {
+  const supabase = getSupabase();
+
+  const { data: business, error: businessError } = await supabase
+    .from("businesses")
+    .select("id, name, is_active, timezone, notification_phone")
+    .eq("id", businessId)
+    .maybeSingle();
+
+  if (businessError) {
+    throw new Error(`Could not query business config: ${businessError.message}`);
+  }
+
+  if (!business) {
+    return;
+  }
+
+  const active = business.is_active ? "active" : "INACTIVE";
+  const hasNotificationPhone = business.notification_phone ? "yes" : "no";
+  console.log(
+    `      ${business.id}  ${active}  tz=${business.timezone}  ` +
+      `notificationPhone=${hasNotificationPhone}`
+  );
+
+  const { count: hoursCount, error: hoursError } = await supabase
+    .from("business_hours")
+    .select("id", { count: "exact", head: true })
+    .eq("business_id", businessId);
+
+  if (hoursError) {
+    throw new Error(`Could not query business hours: ${hoursError.message}`);
+  }
+
+  console.log(`OK    business hours rows: ${hoursCount ?? 0} (7 expected for a full week)`);
+
+  const { data: services, error: servicesError } = await supabase
+    .from("business_services")
+    .select("service_key, low_price, high_price, currency, is_active")
+    .eq("business_id", businessId)
+    .order("service_key", { ascending: true });
+
+  if (servicesError) {
+    throw new Error(`Could not query business services: ${servicesError.message}`);
+  }
+
+  const activeServices = (services ?? []).filter((row) => row.is_active);
+  console.log(`OK    active services: ${activeServices.length} of ${(services ?? []).length}`);
+
+  for (const row of services ?? []) {
+    const state = row.is_active ? "        " : " (off)  ";
+    console.log(
+      `      ${String(row.service_key).padEnd(22)}${state}` +
+        `${row.currency} ${row.low_price}-${row.high_price}`
+    );
+  }
 }
 
 /**
