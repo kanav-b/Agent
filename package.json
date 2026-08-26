@@ -10,7 +10,8 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "db:check": "tsx src/scripts/check-db.ts"
+    "db:check": "tsx src/scripts/check-db.ts",
+    "assistant:preview": "tsx src/scripts/assistant-preview.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",

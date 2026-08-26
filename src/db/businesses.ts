@@ -32,6 +32,12 @@ export interface BusinessRow {
   timezone: string;
   afterHoursMessage: string | null;
   isActive: boolean;
+  /** Optional so existing callers that never asked for an address still fit. */
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  city?: string | null;
+  state?: string | null;
+  postalCode?: string | null;
 }
 
 export interface BusinessHoursRow {
@@ -51,8 +57,10 @@ export interface BusinessServiceRow {
   isActive: boolean;
 }
 
+// One string literal on purpose: the client infers row types from it, and a
+// concatenated expression is opaque to that inference.
 const BUSINESS_COLUMNS =
-  "id, name, phone, notification_phone, timezone, after_hours_message, is_active";
+  "id, name, phone, notification_phone, timezone, after_hours_message, is_active, address_line1, address_line2, city, state, postal_code";
 
 function toBusiness(row: Record<string, unknown>): BusinessRow {
   return {
@@ -62,7 +70,12 @@ function toBusiness(row: Record<string, unknown>): BusinessRow {
     notificationPhone: (row.notification_phone as string | null) ?? null,
     timezone: (row.timezone as string | null) ?? "UTC",
     afterHoursMessage: (row.after_hours_message as string | null) ?? null,
-    isActive: row.is_active !== false
+    isActive: row.is_active !== false,
+    addressLine1: (row.address_line1 as string | null) ?? null,
+    addressLine2: (row.address_line2 as string | null) ?? null,
+    city: (row.city as string | null) ?? null,
+    state: (row.state as string | null) ?? null,
+    postalCode: (row.postal_code as string | null) ?? null
   };
 }
 

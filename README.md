@@ -744,16 +744,115 @@ values
 
 Then send `"businessId": "second-shop"` with the request.
 
+### Generated assistant configuration
+
+The backend can turn a shop's database configuration into the assistant
+configuration for that shop — its name, greeting, system prompt, service list,
+and hours:
+
+```
+demo-shop    →  Demo Auto Repair Receptionist
+joes-garage  →  Joe's Garage Receptionist
+```
+
+Same generator, different rows. Nothing about the demo shop is written into the
+code.
+
+Preview what a shop would get:
+
+```bash
+npm run assistant:preview -- demo-shop
+```
+
+It prints the assistant name, service count, timezone, first message, and
+system prompt. Read-only, and it publishes nothing.
+
+#### Business configuration vs. provider configuration
+
+Two different things, kept apart on purpose:
+
+- **Business configuration** is what this shop's receptionist should say and
+  know — the name, greeting, prompt, services, hours. That is what the
+  generator produces.
+- **Provider configuration** is how Vapi happens to want that expressed —
+  model, voice, transcriber, tool attachment, phone numbers. None of that is
+  modelled here.
+
+The generated object is deliberately *not* a Vapi API object. Translating it
+into one is a separate concern, so the interesting part stays reviewable
+without knowing anything about Vapi.
+
+#### The generator is pure
+
+```
+loadBusinessAssistantConfig(businessId)   ← database
+        ↓
+buildBusinessAssistantConfig({business, hours, services})   ← pure, no I/O
+```
+
+`buildBusinessAssistantConfig()` has no database access, no network, no
+environment, no clock, and no randomness. The same shop configuration always
+produces byte-identical output, so a generated prompt can be reviewed and
+diffed rather than guessed at. There is a test that reads the source file and
+fails if it ever gains an import.
+
+The loader reuses the same queries pricing uses, so "this shop" means one thing
+everywhere. An unknown or inactive shop produces no configuration at all, and
+an explicit `businessId` is never quietly swapped for the default.
+
+#### What the prompt contains
+
+`businessId` is stated explicitly — *"On EVERY backend tool call you must send
+`businessId = "joes-garage"`"* — rather than left to the tool description. That
+line is currently the whole bridge between an assistant and the shared backend.
+
+Services come from `business_services`, listed by display name for the caller
+and mapped to tool keys for the model:
+
+```
+SUPPORTED ESTIMATE SERVICES
+- Front Brake Pads
+
+SERVICE TOOL KEYS
+- Front Brake Pads -> front_brake_pads
+```
+
+Hours come from `business_hours`, with runs of identical days collapsed:
+
+```
+BUSINESS HOURS
+Monday-Friday: 8:00 AM-5:00 PM
+Saturday: Closed
+Sunday: Closed
+Timezone: America/Los_Angeles
+```
+
+This is descriptive only — the generator never works out whether the shop is
+open *right now*, and never reads the clock. A shop with no services still gets
+a valid prompt saying pricing is unavailable, and days with no configuration
+are left out rather than invented.
+
+The prompt also carries the behavioural rules: no invented prices, preliminary
+estimates only, an appointment request is not a booking, a callback is pending,
+explicit SMS consent, no duplicate tool calls, no claiming success before the
+tool says so, and the safety rules.
+
+> **⚠️ The live assistant is still configured by hand.** This phase only
+> generates configuration locally. Nothing is published to Vapi, so editing a
+> shop's rows changes what *would* be generated, not what the assistant
+> currently says. Remote provisioning is Phase 10B.
+
 ### Deferred on purpose
 
+- **Publishing to Vapi.** The assistant configuration is generated locally but
+  never sent anywhere. Creating and updating assistants, attaching tools, and
+  provisioning numbers is Phase 10B.
 - **Dynamic Vapi tool schemas.** The assistant's `calculate_estimate` tool
   still carries a fixed service enum for demo testing. The backend stays the
   authority: a service the shop does not offer is refused regardless of what
-  the tool schema allows. Generating tool schemas per shop is a later phase.
-- **Dynamic system prompts.** `BusinessConfig` (name, phone, timezone,
-  after-hours message, hours) is assembled and ready for it, and is
-  deliberately free of any Vapi-specific types — but nothing rewrites an
-  assistant's prompt yet.
+  the tool schema allows.
+- **Knowing whether the shop is open right now.** `isBusinessOpenAt()` exists
+  and is tested, but the generator is descriptive and never consults it.
 - Holiday hours, multi-location, and tenant authentication.
 
 ## Pricing vs. persistence

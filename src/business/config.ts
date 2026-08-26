@@ -28,6 +28,12 @@ export interface BusinessConfig {
   afterHoursMessage: string | null;
   isActive: boolean;
   hours: BusinessHoursRow[];
+  /** Optional, and only ever the shop's public address — never a caller's. */
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  city?: string | null;
+  state?: string | null;
+  postalCode?: string | null;
 }
 
 /** Why a business could not be used. Both are the caller's problem, not ours. */
@@ -65,7 +71,12 @@ export async function resolveBusiness(businessId: string): Promise<BusinessResol
       timezone: business.timezone,
       afterHoursMessage: business.afterHoursMessage,
       isActive: business.isActive,
-      hours
+      hours,
+      addressLine1: business.addressLine1 ?? null,
+      addressLine2: business.addressLine2 ?? null,
+      city: business.city ?? null,
+      state: business.state ?? null,
+      postalCode: business.postalCode ?? null
     }
   };
 }
