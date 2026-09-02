@@ -20,6 +20,22 @@ export interface Config {
   shopNotificationNumber?: string;
 }
 
+/**
+ * What is needed to publish an assistant to Vapi.
+ *
+ * Separate from the running server's configuration on purpose: the phone
+ * receptionist works fine without any of it, and only the sync command needs
+ * it. The API key is a credential; the tool ids are not.
+ */
+export interface VapiProvisioningConfig {
+  apiKey: string;
+  estimateToolId: string;
+  appointmentRequestToolId: string;
+  callbackRequestToolId: string;
+  modelProvider: string;
+  model: string;
+}
+
 /** The Twilio settings, once the credentials are known to be present. */
 export interface SmsConfig {
   accountSid: string;
@@ -86,6 +102,57 @@ export function getConfig(): Config {
   };
 
   return cached;
+}
+
+/** Everything the sync command needs before it may write to Vapi. */
+export const VAPI_ENV_VARS = [
+  "VAPI_API_KEY",
+  "VAPI_ESTIMATE_TOOL_ID",
+  "VAPI_APPOINTMENT_REQUEST_TOOL_ID",
+  "VAPI_CALLBACK_REQUEST_TOOL_ID"
+] as const;
+
+/** Names of any missing Vapi provisioning variables. Empty when ready. */
+export function missingVapiConfig(): string[] {
+  // Read directly rather than through getConfig(), so a server that never
+  // syncs is never asked for any of this.
+  const missing: string[] = [];
+
+  for (const name of VAPI_ENV_VARS) {
+    if (!process.env[name]?.trim()) {
+      missing.push(name);
+    }
+  }
+
+  return missing;
+}
+
+/**
+ * The Vapi provisioning settings, or a clear error naming what is missing.
+ *
+ * Never echoes a value: the names alone are enough to fix the problem, and
+ * the API key must not reach a log or an error message.
+ */
+export function getVapiConfig(): VapiProvisioningConfig {
+  const missing = missingVapiConfig();
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Vapi provisioning is not configured. Missing: ${missing.join(", ")}. ` +
+        "See .env.example."
+    );
+  }
+
+  return {
+    apiKey: process.env.VAPI_API_KEY!.trim(),
+    estimateToolId: process.env.VAPI_ESTIMATE_TOOL_ID!.trim(),
+    appointmentRequestToolId: process.env.VAPI_APPOINTMENT_REQUEST_TOOL_ID!.trim(),
+    callbackRequestToolId: process.env.VAPI_CALLBACK_REQUEST_TOOL_ID!.trim(),
+    // Only used when creating a brand new assistant. An update keeps whatever
+    // the assistant already has.
+    modelProvider: process.env.VAPI_MODEL_PROVIDER?.trim() || "openai",
+    model: process.env.VAPI_MODEL?.trim() || "gpt-4o"
+  };
 }
 
 /**

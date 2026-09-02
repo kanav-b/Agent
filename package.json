@@ -11,7 +11,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "db:check": "tsx src/scripts/check-db.ts",
-    "assistant:preview": "tsx src/scripts/assistant-preview.ts"
+    "assistant:preview": "tsx src/scripts/assistant-preview.ts",
+    "assistant:sync": "tsx src/scripts/assistant-sync.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",

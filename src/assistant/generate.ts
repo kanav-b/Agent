@@ -54,6 +54,8 @@ export interface AssistantGeneratorInput {
  */
 export interface BusinessAssistantConfig {
   businessId: string;
+  /** The shop's own name, as configured. */
+  businessName: string;
   assistantName: string;
   firstMessage: string;
   systemPrompt: string;
@@ -414,6 +416,7 @@ export function buildBusinessAssistantConfig(
 
   return {
     businessId: business.id,
+    businessName: name,
     assistantName,
     firstMessage,
     systemPrompt,

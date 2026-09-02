@@ -47,6 +47,8 @@ Then open `.env` and fill in the values below:
 | `TWILIO_FROM_NUMBER` | An SMS-capable Twilio number, E.164 (`+14155550123`) |
 | `SHOP_NOTIFICATION_NUMBER` | Fallback for shop alerts, E.164 — optional |
 | `SMS_ENABLED` | `true` or `false` — **defaults to `false`** |
+| `VAPI_API_KEY` | Vapi dashboard → API Keys → a **private** key. Only `assistant:sync --apply` needs it |
+| `VAPI_*_TOOL_ID` | Ids of your three existing Vapi tools — see below |
 
 `PORT` is optional and defaults to `3000`.
 
@@ -126,12 +128,14 @@ supabase/migrations/20260819000200_requests.sql
 supabase/migrations/20260819000300_notifications.sql
 supabase/migrations/20260819000400_sms_consent.sql
 supabase/migrations/20260819000500_business_config.sql
+supabase/migrations/20260819000600_business_integrations.sql
 ```
 
 These add the `calls` table, let an estimate remember which call produced it,
 add `appointment_requests` and `callback_requests`, add `notifications`, and
-add the SMS consent columns, and add the per-shop configuration tables. All
-are safe to run more than once.
+add the SMS consent columns, add the per-shop configuration tables, and record
+which Vapi assistant belongs to which shop. All are safe to run more than
+once.
 
 ## 4. Check the database connection
 
@@ -842,11 +846,122 @@ tool says so, and the safety rules.
 > shop's rows changes what *would* be generated, not what the assistant
 > currently says. Remote provisioning is Phase 10B.
 
+### Publishing an assistant to Vapi
+
+Each business gets **one Vapi assistant of its own**, all pointing at this one
+backend:
+
+```
+demo-shop    →  its own Vapi assistant  ─┐
+joes-garage  →  its own Vapi assistant  ─┴→  the same backend + tools
+```
+
+The assistant carries what differs between shops — name, greeting, prompt,
+service list. Pricing, requests, persistence, authentication, and
+notifications stay in the backend, told apart by the `businessId` the prompt
+embeds.
+
+#### The workflow
+
+```bash
+# 1. See what would be generated
+npm run assistant:preview -- demo-shop
+
+# 2. See what a sync would do. Reads the database; touches nothing.
+npm run assistant:sync -- demo-shop
+
+# 3. Actually do it
+npm run assistant:sync -- demo-shop --apply
+```
+
+**Synchronisation is explicit.** Editing a shop's rows in Supabase changes
+what *would* be generated; it never touches Vapi on its own. Nothing syncs on
+a database write, on a schedule, or via a webhook.
+
+**`--apply` is the only thing that writes remotely.** Without it the command
+plans and stops:
+
+```
+Business:      Demo Auto Repair
+Business ID:   demo-shop
+Operation:     CREATE
+Assistant:     Demo Auto Repair Receptionist
+Services:      5
+Timezone:      America/Los_Angeles
+Remote changes: NO (--apply not supplied)
+```
+
+The plan never prints the system prompt or the provider payload — use
+`assistant:preview` to read prompt text.
+
+#### What the backend owns
+
+| Owned here — a sync overwrites it | Owned by Vapi — never sent |
+| --- | --- |
+| Assistant name | Voice and voice provider |
+| First message | Transcriber settings |
+| System prompt (`model.messages`) | Model provider and tuning* |
+| | Attached tools, on update |
+| | Phone numbers |
+| | Everything else in the dashboard |
+
+\* Model provider and name are set **once, at creation**, from
+`VAPI_MODEL_PROVIDER` / `VAPI_MODEL` (defaulting to `openai` / `gpt-4o`). An
+update never changes them.
+
+> **⚠️ Dashboard edits to owned fields will be overwritten.** If you rewrite an
+> assistant's prompt or greeting in the Vapi dashboard, the next
+> `--apply` replaces it with what the database generates. Edit the database,
+> not the dashboard, for anything in the left column.
+
+There is a subtlety worth knowing: Vapi's `PATCH` **replaces a nested object
+wholesale** rather than merging into it. The system prompt lives inside
+`model`, so sending just `model: { messages }` would silently drop the
+assistant's provider, tuning, and attached tools. An update therefore reads
+the assistant first and puts our messages into the model it already has.
+
+#### Tools
+
+The three tools are shared: every assistant points at the same backend
+endpoints, and none are created, edited, or deleted by a sync. Their ids are
+supplied through the environment. **Creating an assistant fails cleanly if any
+of the three is missing** — better no receptionist than one that cannot quote
+or take a request.
+
+#### The mapping
+
+`business_integrations` records which assistant belongs to which shop. Two
+database constraints do the real work: one assistant per business per
+provider, and no two businesses pointing at the same assistant. Running
+`--apply` repeatedly therefore keeps targeting the same assistant.
+
+The row is written **only after** Vapi confirms the assistant exists, so it
+never claims something that was not created.
+
+#### When a sync refuses
+
+| Situation | What happens |
+| --- | --- |
+| Unknown or inactive business | Refused before anything is generated |
+| Integration `disabled` | Refused. Never silently reactivated |
+| Integration `error` | Refused pending a look |
+| Stored assistant missing remotely (404) | **Refused.** No replacement is created — a deleted assistant is worth noticing, not papering over |
+| `VAPI_API_KEY` or a tool id missing | Refused before any network call |
+
+Provider failures are reduced to an HTTP status and a short category. The
+response body is deliberately discarded: it can echo the prompt just
+submitted, and that is business content rather than terminal output. No key or
+authorization header ever appears in a message or a log.
+
+#### Deleting
+
+Not implemented, deliberately. A sync never deletes an assistant, never
+removes a tool, and never touches a phone number.
+
 ### Deferred on purpose
 
-- **Publishing to Vapi.** The assistant configuration is generated locally but
-  never sent anywhere. Creating and updating assistants, attaching tools, and
-  provisioning numbers is Phase 10B.
+- **Phone-number provisioning.** A sync never assigns or changes a number.
+- **Assistant deletion and orphan cleanup.**
 - **Dynamic Vapi tool schemas.** The assistant's `calculate_estimate` tool
   still carries a fixed service enum for demo testing. The backend stays the
   authority: a service the shop does not offer is refused regardless of what
